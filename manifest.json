@@ -1,0 +1,26 @@
+{
+  "name": "Yamaha SMAX/Force 155 — Simulateur",
+  "short_name": "SMAX 155",
+  "description": "Simulateur SMAX/Force 155 : moteur, CVT, ECU, entretien et trajets connectés.",
+  "start_url": "./Yamaha_Smax.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0b0f",
+  "theme_color": "#f4d000",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
