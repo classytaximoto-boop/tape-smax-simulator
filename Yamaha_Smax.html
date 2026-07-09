@@ -16291,7 +16291,7 @@ ecuAnimId = requestAnimationFrame(ecuLoop);
     if (!overlay) return;
     motoFillForm();
     const closeBtn = document.getElementById('motoModalCloseBtn');
-    if (closeBtn) closeBtn.style.display = 'none'; // premier lancement : pas d'échappatoire
+    if (closeBtn) closeBtn.style.display = 'flex'; // visible dès le premier lancement, mais motoCloseSetup() bloque tant que l'odomètre n'est pas rempli
     const intro = document.getElementById('motoModalIntro');
     if (intro) intro.innerHTML = 'Avant de suivre le ravitaillement et l\'entretien, renseigne les infos de ta moto une bonne fois pour toutes. Le kilométrage saisi ici fixe ton <b>odomètre réel</b> (immuable ensuite) — c\'est ensuite le <b>trip</b> qui sera suivi pour savoir quand faire l\'entretien ou le plein.';
     const odoLabel = document.getElementById('motoFormOdoLabel');
@@ -16320,11 +16320,24 @@ ecuAnimId = requestAnimationFrame(ecuLoop);
     overlay.classList.add('open');
   };
 
-  // Ferme la fiche sans rien enregistrer (uniquement possible en mode
-  // édition — le premier lancement, lui, ne peut pas être esquivé).
+  // Ferme la fiche sans rien enregistrer. En mode édition, fermeture libre.
+  // Au premier lancement, le bouton × est visible mais la fermeture est
+  // bloquée tant que l'odomètre n'a pas été validé (odometerSetupDone),
+  // avec un avertissement affiché à la place de fermer silencieusement.
   window.motoCloseSetup = function(){
-    if (!motoEditMode) return;
     const overlay = document.getElementById('motoModalOverlay');
+    if (motoEditMode) {
+      if (overlay) overlay.classList.remove('open');
+      return;
+    }
+    if (!F.odometerSetupDone) {
+      const warnEl = document.getElementById('motoFormOdoWarn');
+      if (warnEl) {
+        warnEl.textContent = 'Renseigne au moins le kilométrage actuel avant de fermer — cette valeur fixe ton odomètre réel et ne peut pas être ajoutée plus tard sans recalibrage.';
+        warnEl.style.display = 'block';
+      }
+      return;
+    }
     if (overlay) overlay.classList.remove('open');
   };
 
