@@ -16320,24 +16320,12 @@ ecuAnimId = requestAnimationFrame(ecuLoop);
     overlay.classList.add('open');
   };
 
-  // Ferme la fiche sans rien enregistrer. En mode édition, fermeture libre.
-  // Au premier lancement, le bouton × est visible mais la fermeture est
-  // bloquée tant que l'odomètre n'a pas été validé (odometerSetupDone),
-  // avec un avertissement affiché à la place de fermer silencieusement.
+  // Ferme la fiche sans rien enregistrer, dans tous les cas — y compris
+  // au premier lancement. L'utilisateur peut fermer et explorer les autres
+  // onglets librement ; la fiche moto reste réouvrable ensuite (bouton
+  // dans l'onglet "My Moto") pour renseigner l'odomètre plus tard.
   window.motoCloseSetup = function(){
     const overlay = document.getElementById('motoModalOverlay');
-    if (motoEditMode) {
-      if (overlay) overlay.classList.remove('open');
-      return;
-    }
-    if (!F.odometerSetupDone) {
-      const warnEl = document.getElementById('motoFormOdoWarn');
-      if (warnEl) {
-        warnEl.textContent = 'Renseigne au moins le kilométrage actuel avant de fermer — cette valeur fixe ton odomètre réel et ne peut pas être ajoutée plus tard sans recalibrage.';
-        warnEl.style.display = 'block';
-      }
-      return;
-    }
     if (overlay) overlay.classList.remove('open');
   };
 
