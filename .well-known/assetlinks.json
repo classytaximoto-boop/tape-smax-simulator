@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.smax.tracker",
+    "sha256_cert_fingerprints": [
+      "FE:AA:31:21:CC:4B:73:67:0F:F9:02:E1:5D:27:16:C9:6A:55:E3:30:37:BA:C6:2D:CE:EC:54:5E:88:D5:94:5F"
+    ]
+  }
+}]
