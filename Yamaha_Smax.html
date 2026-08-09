@@ -11850,7 +11850,9 @@ function bbLiveDriveTick(dtRealS) {
     // rester cohérent avec le reste de l'application plutôt que d'inventer
     // un second modèle de consommation. Le temps réel (dtRealS) reste la
     // base de la consommation, indépendamment de l'accéléré visuel carte.
-    const fuel = (typeof computeFuelConsumption === 'function') ? computeFuelConsumption() : null;
+    const fuel = (typeof computeFuelConsumption === 'function') ? computeFuelConsumption() : null;if (typeof fuel === 'number' && window.__reportConsoToAndroid) {
+        window.__reportConsoToAndroid(fuel);
+      }
     if (fuel) {
       const usedL = fuel.lh * (dtRealS / 3600);
       bbFuelUsedL += usedL;
@@ -22664,7 +22666,13 @@ ecuAnimId = requestAnimationFrame(ecuLoop);
     F.lastGpsLon = lon;
   }
   // Expose la fonction pour être appelée depuis le watchPosition existant
-  window.__fuelOnGpsPosition = fuelOnGpsPosition;
+  window.__fuelOnGpsPosition = fuelOnGpsPosition;window.__reportConsoToAndroid = function(litersPer100km){
+  try {
+    if (window.AndroidFuelBridge && typeof window.AndroidFuelBridge.reportConsumption === 'function') {
+      window.AndroidFuelBridge.reportConsumption(litersPer100km);
+    }
+  } catch(e) {}
+};
 
   // ── Recherche de stations-service via Overpass API (OpenStreetMap) ──
   window.fuelFindStations = function(){
