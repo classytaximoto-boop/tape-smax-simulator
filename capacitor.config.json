@@ -1,0 +1,9 @@
+{
+  "appId": "com.hery.smax155",
+  "appName": "SMAX 155",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true
+  }
+}
