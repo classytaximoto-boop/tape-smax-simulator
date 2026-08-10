@@ -78,7 +78,6 @@ jobs:
               '\n        <item name="android:navigationBarColor">#f4d000</item>'
               '\n        <item name="android:windowLightStatusBar">true</item>'
               '\n        <item name="android:windowLightNavigationBar">true</item>'
-              '\n        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>'
           )
 
           idx = content.find("</style>")
