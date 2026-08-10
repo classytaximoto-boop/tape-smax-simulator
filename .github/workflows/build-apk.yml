@@ -66,6 +66,30 @@ jobs:
               f.write(content)
           EOF
 
+      - name: Set status bar & navigation bar color
+        run: |
+          python3 - <<'EOF'
+          path = "android/app/src/main/res/values/styles.xml"
+          with open(path) as f:
+              content = f.read()
+
+          items = (
+              '\n        <item name="android:statusBarColor">#f4d000</item>'
+              '\n        <item name="android:navigationBarColor">#f4d000</item>'
+              '\n        <item name="android:windowLightStatusBar">true</item>'
+              '\n        <item name="android:windowLightNavigationBar">true</item>'
+          )
+
+          idx = content.find("</style>")
+          if idx != -1:
+              content = content[:idx] + items + "\n    " + content[idx:]
+              with open(path, "w") as f:
+                  f.write(content)
+              print("styles.xml patched")
+          else:
+              print("WARNING: </style> not found, styles.xml left unchanged")
+          EOF
+
       - name: Sync Capacitor
         run: npx cap sync android
 
