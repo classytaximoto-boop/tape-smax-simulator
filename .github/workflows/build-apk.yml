@@ -78,6 +78,7 @@ jobs:
               '\n        <item name="android:navigationBarColor">#f4d000</item>'
               '\n        <item name="android:windowLightStatusBar">true</item>'
               '\n        <item name="android:windowLightNavigationBar">true</item>'
+              '\n        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>'
           )
 
           idx = content.find("</style>")
@@ -88,6 +89,24 @@ jobs:
               print("styles.xml patched")
           else:
               print("WARNING: </style> not found, styles.xml left unchanged")
+          EOF
+
+      - name: Pin target/compile SDK to 34
+        run: |
+          python3 - <<'EOF'
+          import re
+          path = "android/variables.gradle"
+          try:
+              with open(path) as f:
+                  content = f.read()
+          except FileNotFoundError:
+              print("variables.gradle not found, skipping")
+          else:
+              content = re.sub(r"compileSdkVersion\s*=\s*\d+", "compileSdkVersion = 34", content)
+              content = re.sub(r"targetSdkVersion\s*=\s*\d+", "targetSdkVersion = 34", content)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("variables.gradle patched to SDK 34")
           EOF
 
       - name: Sync Capacitor
