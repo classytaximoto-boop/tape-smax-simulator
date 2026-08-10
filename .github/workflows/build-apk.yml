@@ -38,6 +38,9 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Generate native icons & splash screen
+        run: npx @capacitor/assets generate --android
+
       - name: Add native permissions
         run: |
           python3 - <<'EOF'
