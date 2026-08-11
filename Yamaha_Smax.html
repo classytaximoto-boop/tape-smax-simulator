@@ -4291,8 +4291,9 @@ html.anim-reduced #engineLedBorder .fizz-bubble { animation: none; opacity: 0; }
       <div class="settings-row-hint">Vibration du téléphone quand un nouveau code défaut apparaît (si supporté)</div>
       <div class="settings-toggle-row">
         <span>Vibration à l'apparition d'un défaut</span>
-        <div class="settings-toggle-switch" id="vibrateOnFaultToggle" onclick="toggleSettingsPerm('vibrateOnFaultToggle')"><div class="settings-toggle-knob"></div></div>
+        <div class="settings-toggle-switch" id="vibrateOnFaultToggle" onclick="toggleVibrateOnFault()"><div class="settings-toggle-knob"></div></div>
       </div>
+      <div class="settings-row-hint" id="vibrateOnFaultStatus" style="margin-top:6px;"></div>
     </div>
 
     <div class="settings-row">
@@ -11263,32 +11264,18 @@ function gpsProcessBackgroundSafe(lat, lon, speedKmh, headingDeg, altitude) {
 
 const NativeGpsNotif = (function () {
   let watcherId = null;
-  let bgPlugin = null;
-  let notifPlugin = null;
+  let plugin = null;
   let lastUpdate = 0;
-  let notifActive = false;
   const MIN_UPDATE_INTERVAL_MS = 2000; // évite de spammer l'API notification
-  const NOTIF_ID = 991155; // ID fixe : reprogrammer avec ce même ID REMPLACE
-                            // la notification existante (comportement standard
-                            // Android NotificationManager.notify(id, ...)),
-                            // c'est ce qui permet la mise à jour "live".
 
-  function getBgPlugin() {
-    if (bgPlugin) return bgPlugin;
+  function getPlugin() {
+    if (plugin) return plugin;
     // Le plugin s'enregistre globalement sous window.Capacitor.Plugins
     // une fois `npx cap sync` exécuté avec la dépendance npm installée.
     if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundGeolocation) {
-      bgPlugin = window.Capacitor.Plugins.BackgroundGeolocation;
+      plugin = window.Capacitor.Plugins.BackgroundGeolocation;
     }
-    return bgPlugin;
-  }
-
-  function getNotifPlugin() {
-    if (notifPlugin) return notifPlugin;
-    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications) {
-      notifPlugin = window.Capacitor.Plugins.LocalNotifications;
-    }
-    return notifPlugin;
+    return plugin;
   }
 
   function compassLabel(deg) {
@@ -11316,57 +11303,8 @@ const NativeGpsNotif = (function () {
     return text;
   }
 
-  // ── Programme (ou reprogramme) la notification persistante avec un ID
-  //    fixe : Android remplace le contenu affiché dans la barre système
-  //    et l'écran verrouillé au lieu d'empiler une nouvelle notification. ──
-  async function pushNotif(state) {
-    const np = getNotifPlugin();
-    if (!np) return;
-    try {
-      await np.schedule({
-        notifications: [{
-          id: NOTIF_ID,
-          title: 'SMAX 155 — GPS actif',
-          body: buildNotifText(state),
-          ongoing: true,
-          autoCancel: false,
-          silent: true // pas de son/vibration à chaque rafraîchissement
-        }]
-      });
-      notifActive = true;
-    } catch (e) { /* silencieux (permission refusée, plugin absent, etc.) */ }
-  }
-
-  async function cancelNotif() {
-    const np = getNotifPlugin();
-    if (!np || !notifActive) { notifActive = false; return; }
-    try { await np.cancel({ notifications: [{ id: NOTIF_ID }] }); } catch (e) { /* silencieux */ }
-    notifActive = false;
-  }
-
-  async function ensureNotifPermission() {
-    const np = getNotifPlugin();
-    if (!np) return false;
-    try {
-      const perm = await np.checkPermissions();
-      if (perm.display === 'granted') return true;
-      const req = await np.requestPermissions();
-      return req.display === 'granted';
-    } catch (e) { return false; }
-  }
-
   async function start() {
-    // ── Notification live (barre système + écran verrouillé), via
-    //    @capacitor/local-notifications : seul mécanisme permettant de
-    //    RÉÉCRIRE le contenu d'une notification déjà affichée. Le plugin
-    //    BackgroundGeolocation n'expose aucune méthode de mise à jour
-    //    (seulement addWatcher/removeWatcher) — son propre texte de
-    //    notification reste donc figé, on ne l'utilise que pour le service
-    //    de localisation en arrière-plan, jamais pour l'affichage. ────────
-    const hasPermission = await ensureNotifPermission();
-    if (hasPermission) await pushNotif(GPS_STATE);
-
-    const p = getBgPlugin();
+    const p = getPlugin();
     if (!p) {
       console.warn('NativeGpsNotif: plugin BackgroundGeolocation indisponible (pas encore synchronisé ?)');
       return;
@@ -11375,7 +11313,7 @@ const NativeGpsNotif = (function () {
       watcherId = await p.addWatcher(
         {
           backgroundTitle: 'SMAX 155 — GPS actif',
-          backgroundMessage: 'Suivi de position en arrière-plan',
+          backgroundMessage: buildNotifText(GPS_STATE),
           requestPermissions: true,
           stale: false,
           distanceFilter: 5
@@ -11385,7 +11323,7 @@ const NativeGpsNotif = (function () {
           // ── Relais arrière-plan : quand l'app quitte le premier plan,
           // Android suspend/throttle le watchPosition web standard utilisé
           // par toggleGpsTracker, donc GPSManager.processPosition() n'est
-          // plus appelé et l'affichage reste figé. Le plugin natif
+          // plus appelé et la notification reste figée. Le plugin natif
           // BackgroundGeolocation, lui, continue de recevoir des positions
           // même en arrière-plan — on ne les relaie DONC que dans ce cas
           // précis (document caché), pour ne jamais dupliquer les mises à
@@ -11424,26 +11362,29 @@ const NativeGpsNotif = (function () {
   }
 
   async function stop() {
-    await cancelNotif();
-    const p = getBgPlugin();
+    const p = getPlugin();
     if (!p || watcherId === null) return;
     try { await p.removeWatcher({ id: watcherId }); } catch (e) { /* silencieux */ }
     watcherId = null;
   }
 
   function onGpsStateChange(state) {
-    if (!notifActive) return;
+    if (watcherId === null) return;
     const now = Date.now();
     if (now - lastUpdate < MIN_UPDATE_INTERVAL_MS) return;
     lastUpdate = now;
-    pushNotif(state);
+    const p = getPlugin();
+    if (!p || typeof p.updateNotification !== 'function') return;
+    p.updateNotification({
+      title: 'SMAX 155 — GPS actif',
+      body: buildNotifText(state)
+    }).catch(() => { /* silencieux */ });
   }
 
   GPSManager.subscribe(onGpsStateChange);
 
   return { start, stop };
 })();
-
 
 // ── Popup "Mode Ralenti ?" : proposée une seule fois, à la toute
 //    première activation du GPS sur cet appareil (anti-répétition via
@@ -16597,6 +16538,85 @@ function renderFaultLegend() {
   el.dataset.built = '1';
 }
 
+// ── Toggle "Alerte défaut moteur" (vibreur) ─────────────────────────────
+// IMPORTANT — app packagée Capacitor (WebView Android) :
+// navigator.vibrate() est l'API Vibration standard des NAVIGATEURS web.
+// Dans une WebView Capacitor packagée en .apk, cette API est très
+// souvent absente ou silencieusement ignorée par le WebView Android,
+// MÊME si le code est correct — ce n'est pas un bug de logique, c'est
+// une limitation de la WebView elle-même. Le plugin officiel Capacitor
+// pour ça s'appelle "Haptics" (@capacitor/haptics) et passe par du code
+// natif Android, donc ça vibre réellement dans l'app packagée.
+//
+// Ce fichier HTML ne peut pas ajouter de dépendance npm lui-même (ça se
+// fait côté package.json/build, hors de ce fichier), donc la fonction
+// ci-dessous détecte à l'exécution si window.Capacitor.Plugins.Haptics
+// est déjà enregistré (c-à-d si le plugin a été installé et buildé côté
+// natif) et l'utilise en priorité. Sinon elle retombe sur
+// navigator.vibrate() (utile si le fichier est aussi ouvert dans un
+// navigateur normal), et si aucun des deux n'est disponible, elle
+// l'affiche clairement au lieu de rester silencieuse.
+function fireVibration(pattern) {
+  // 1) Plugin natif Capacitor Haptics, si installé et enregistré.
+  const haptics = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Haptics;
+  if (haptics) {
+    try {
+      // vibrate() du plugin Haptics prend { duration } en ms (impulsion
+      // unique) — on simule un pattern en enchaînant plusieurs impulsions.
+      if (typeof haptics.vibrate === 'function') {
+        let delay = 0;
+        pattern.forEach((ms, i) => {
+          if (i % 2 === 0) { // segments pairs = vibration, impairs = pause
+            setTimeout(() => haptics.vibrate({ duration: ms }), delay);
+          }
+          delay += ms;
+        });
+        return 'haptics';
+      }
+      // Fallback API impact si vibrate() n'existe pas sur cette version du plugin
+      if (typeof haptics.impact === 'function') {
+        haptics.impact({ style: 'HEAVY' });
+        return 'haptics';
+      }
+    } catch (e) {
+      console.warn('Capacitor Haptics a échoué:', e);
+    }
+  }
+  // 2) API Vibration standard du navigateur/WebView (repli).
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    const ok = navigator.vibrate(pattern);
+    return ok ? 'navigator' : 'navigator-refused';
+  }
+  return 'unsupported';
+}
+
+function toggleVibrateOnFault() {
+  const toggle = document.getElementById('vibrateOnFaultToggle');
+  const statusEl = document.getElementById('vibrateOnFaultStatus');
+  if (!toggle) return;
+  const turningOn = !toggle.classList.contains('on');
+  toggle.classList.toggle('on', turningOn);
+
+  if (!statusEl) return;
+  if (!turningOn) {
+    statusEl.textContent = '';
+    return;
+  }
+  // Retour immédiat pour SENTIR que ça marche tout de suite, plutôt que
+  // d'attendre un vrai défaut moteur pour le découvrir.
+  const result = fireVibration([120, 60, 120]);
+  if (result === 'haptics') {
+    statusEl.innerHTML = '<i class="i-ic" data-lucide="check"></i> Vibreur activé (via Capacitor Haptics — test envoyé).';
+  } else if (result === 'navigator') {
+    statusEl.innerHTML = '<i class="i-ic" data-lucide="check"></i> Vibreur activé (test envoyé — vous devriez avoir senti 2 vibrations courtes).';
+  } else if (result === 'navigator-refused') {
+    statusEl.innerHTML = '<i class="i-ic" data-lucide="alert-triangle"></i> Le navigateur a refusé la vibration (mode silencieux/économie d\'énergie ?).';
+  } else {
+    // Cas le plus probable en app Capacitor packagée sans le plugin Haptics installé.
+    statusEl.innerHTML = '<i class="i-ic" data-lucide="alert-triangle"></i> Vibreur indisponible ici : dans l\'app packagée, ça nécessite le plugin natif @capacitor/haptics (npm install + rebuild). Sans lui, le WebView Android bloque navigator.vibrate().';
+  }
+}
+
 // Active le témoin moteur (MIL) sur un code défaut donné (peut en gérer
 // plusieurs à la fois — on affiche toujours le plus prioritaire/premier actif)
 let activeEngineFaults = new Set();
@@ -16607,12 +16627,12 @@ function triggerEngineFault(code) {
   S.engineErrorCode = Math.min(...activeEngineFaults);
   // Vibration réelle du téléphone à l'apparition d'un NOUVEAU défaut (pas à
   // chaque frame tant qu'il reste actif), si le réglage "Alerte défaut
-  // moteur" est activé. Auparavant ce toggle ne changeait qu'une classe CSS
-  // sans effet réel.
+  // moteur" est activé. Utilise fireVibration() qui essaie le plugin natif
+  // Capacitor Haptics avant de retomber sur l'API web standard.
   if (isNewFault) {
     const toggle = document.getElementById('vibrateOnFaultToggle');
-    if (toggle && toggle.classList.contains('on') && typeof navigator !== 'undefined' && navigator.vibrate) {
-      navigator.vibrate([120, 60, 120]);
+    if (toggle && toggle.classList.contains('on')) {
+      fireVibration([120, 60, 120]);
     }
   }
 }
@@ -19887,6 +19907,21 @@ async function toggleMicDetector() {
     // un serveur en http:// simple ne l'est pas), l'API est absente et
     // l'ancien code affichait à tort "ACCÈS REFUSÉ" comme si l'utilisateur
     // avait refusé la permission, ce qui masquait la vraie cause.
+    // Cas le plus fréquent en pratique : le fichier HTML est ouvert en
+    // file:// (ex: ouvert directement depuis Acode/un gestionnaire de
+    // fichiers Android, ou via l'app Fichiers sur iOS) plutôt que servi en
+    // http(s)://. Sur file://, getUserMedia peut être présent dans le DOM
+    // (donc le test ci-dessous passait) mais échoue systématiquement à
+    // l'appel avec une erreur peu claire selon le navigateur. On distingue
+    // ce cas explicitement pour donner une explication actionnable plutôt
+    // que "ERREUR MICRO".
+    if (location.protocol === 'file:') {
+      btn.innerHTML = '<i class="i-ic" data-lucide="mic"></i> MICRO IMPOSSIBLE EN file://';
+      const detEl0 = document.getElementById('micDetectStatus');
+      if (detEl0) detEl0.innerHTML = '<i class="i-ic" data-lucide="alert-triangle"></i> Fichier ouvert en file:// — le micro exige http(s)://. Servez-le via un serveur local ou un hébergement https.';
+      setTimeout(() => { btn.innerHTML = '<i class="i-ic" data-lucide="mic"></i> MICRO OFF'; }, 4000);
+      return;
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       btn.innerHTML = '<i class="i-ic" data-lucide="mic"></i> MICRO INDISPONIBLE (HTTPS requis)';
       setTimeout(() => { btn.innerHTML = '<i class="i-ic" data-lucide="mic"></i> MICRO OFF'; }, 3000);
@@ -19898,10 +19933,33 @@ async function toggleMicDetector() {
       } });
     } catch (err) {
       // Distingue le refus de permission d'une autre erreur (micro déjà pris,
-      // aucun micro détecté, etc.) pour un diagnostic plus clair.
-      const reason = (err && err.name === 'NotAllowedError') ? 'ACCÈS REFUSÉ'
-                   : (err && err.name === 'NotFoundError') ? 'AUCUN MICRO' : 'ERREUR MICRO';
+      // aucun micro détecté, contexte non sécurisé côté WebView type Acode,
+      // etc.) pour un diagnostic plus clair.
+      const name = err && err.name;
+      const isCapacitorApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+      const reason = name === 'NotAllowedError' ? 'ACCÈS REFUSÉ'
+                   : name === 'NotFoundError' ? 'AUCUN MICRO'
+                   : (name === 'NotReadableError' || name === 'AbortError') ? 'MICRO DÉJÀ UTILISÉ'
+                   : name === 'SecurityError' ? 'CONTEXTE NON SÉCURISÉ'
+                   : 'ERREUR MICRO';
       btn.innerHTML = `<i class="i-ic" data-lucide="mic"></i> ${reason}`;
+      const detElErr = document.getElementById('micDetectStatus');
+      if (detElErr) {
+        const detail = name === 'NotAllowedError'
+          ? (isCapacitorApp
+              ? 'Dans l\'app installée, allez dans Réglages Android → Apps → [nom de l\'app] → Autorisations → Microphone, et activez-la manuellement (le WebView ne redemande pas toujours automatiquement).'
+              : 'Autorisez le micro pour cette page dans les réglages du navigateur, puis réessayez.')
+          : name === 'NotFoundError'
+          ? 'Aucun micro détecté sur cet appareil.'
+          : (name === 'NotReadableError' || name === 'AbortError')
+          ? 'Une autre appli utilise déjà le micro. Fermez-la puis réessayez.'
+          : name === 'SecurityError'
+          ? (isCapacitorApp
+              ? 'La permission android.permission.RECORD_AUDIO doit être déclarée dans AndroidManifest.xml et accordée (config native, hors de ce fichier HTML).'
+              : 'La page doit être servie en https:// (ou localhost) pour accéder au micro.')
+          : `Détail : ${name || err}`;
+        detElErr.textContent = detail;
+      }
       console.warn('getUserMedia a échoué:', err);
       setTimeout(() => { btn.innerHTML = '<i class="i-ic" data-lucide="mic"></i> MICRO OFF'; }, 2500);
       return;
