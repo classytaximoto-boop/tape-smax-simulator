@@ -58,10 +58,22 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
               <uses-feature android:name="android.hardware.camera" android:required="false" />
               <uses-feature android:name="android.hardware.location.gps" android:required="false" />
           """
           content = re.sub(r'(<manifest[^>]*>)', r'\1' + perms, content, count=1)
+
+          service_tag = (
+              '\n        <service\n'
+              '            android:name="com.equimaps.capacitor_background_geolocation.BackgroundGeolocationService"\n'
+              '            android:enabled="true"\n'
+              '            android:exported="true"\n'
+              '            android:foregroundServiceType="location" />\n'
+          )
+          if 'BackgroundGeolocationService' not in content:
+              content = re.sub(r'(<application[^>]*>)', r'\1' + service_tag, content, count=1)
+
           with open(path, "w") as f:
               f.write(content)
           EOF
