@@ -56,26 +56,46 @@ jobs:
                       "import com.getcapacitor.BridgeActivity;\n"
                       "import android.webkit.PermissionRequest;\n"
                       "import android.webkit.WebChromeClient;\n"
-                      "import android.os.Bundle;"
+                      "import android.webkit.WebView;"
                   )
 
+              patch_snippet = (
+                  "\n        WebView webView = this.bridge.getWebView();\n"
+                  "        webView.post(() -> {\n"
+                  "            webView.setWebChromeClient(new WebChromeClient() {\n"
+                  "                @Override\n"
+                  "                public void onPermissionRequest(final PermissionRequest request) {\n"
+                  "                    runOnUiThread(() -> request.grant(request.getResources()));\n"
+                  "                }\n"
+                  "            });\n"
+                  "        });"
+              )
+
               if "onPermissionRequest" not in content:
-                  content = re.sub(
-                      r"(super\.onCreate\(savedInstanceState\);)",
-                      r"\1\n"
-                      r"        this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {\n"
-                      r"            @Override\n"
-                      r"            public void onPermissionRequest(final PermissionRequest request) {\n"
-                      r"                runOnUiThread(() -> request.grant(request.getResources()));\n"
-                      r"            }\n"
-                      r"        });",
-                      content,
-                      count=1
-                  )
+                  if "super.onCreate(savedInstanceState);" in content:
+                      content = content.replace(
+                          "super.onCreate(savedInstanceState);",
+                          "super.onCreate(savedInstanceState);" + patch_snippet,
+                          1
+                      )
+                  else:
+                      content = re.sub(
+                          r"(public class MainActivity extends BridgeActivity \{)",
+                          r"\1\n"
+                          r"    @Override\n"
+                          r"    protected void onCreate(android.os.Bundle savedInstanceState) {\n"
+                          r"        super.onCreate(savedInstanceState);" + patch_snippet + "\n"
+                          r"    }\n",
+                          content,
+                          count=1
+                      )
 
               with open(path, "w") as f:
                   f.write(content)
               print("MainActivity.java patched:", path)
+              print("----- FULL FILE CONTENT -----")
+              print(content)
+              print("----- END FILE CONTENT -----")
           EOF
 
       - name: Generate native icons & splash screen
