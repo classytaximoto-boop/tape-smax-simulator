@@ -38,6 +38,46 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Patch MainActivity to grant WebView media permissions
+        run: |
+          python3 - <<'EOF'
+          import re, glob
+          matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
+          if not matches:
+              print("WARNING: MainActivity.java not found, skipping")
+          else:
+              path = matches[0]
+              with open(path) as f:
+                  content = f.read()
+
+              if "import android.webkit.PermissionRequest;" not in content:
+                  content = content.replace(
+                      "import com.getcapacitor.BridgeActivity;",
+                      "import com.getcapacitor.BridgeActivity;\n"
+                      "import android.webkit.PermissionRequest;\n"
+                      "import android.webkit.WebChromeClient;\n"
+                      "import android.os.Bundle;"
+                  )
+
+              if "onPermissionRequest" not in content:
+                  content = re.sub(
+                      r"(super\.onCreate\(savedInstanceState\);)",
+                      r"\1\n"
+                      r"        this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {\n"
+                      r"            @Override\n"
+                      r"            public void onPermissionRequest(final PermissionRequest request) {\n"
+                      r"                runOnUiThread(() -> request.grant(request.getResources()));\n"
+                      r"            }\n"
+                      r"        });",
+                      content,
+                      count=1
+                  )
+
+              with open(path, "w") as f:
+                  f.write(content)
+              print("MainActivity.java patched:", path)
+          EOF
+
       - name: Generate native icons & splash screen
         run: npx @capacitor/assets generate --android
 
@@ -58,7 +98,6 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
-              <uses-permission android:name="android.permission.VIBRATE" />
               <uses-feature android:name="android.hardware.camera" android:required="false" />
               <uses-feature android:name="android.hardware.location.gps" android:required="false" />
           """
