@@ -11,6 +11,7 @@
     "@capacitor/geolocation": "^6.0.1",
     "@capacitor/camera": "^6.0.2",
     "@capacitor/local-notifications": "^6.1.0",
+    "@capacitor/haptics": "^6.0.1",
     "@capacitor-community/background-geolocation": "^1.2.24"
   },
   "devDependencies": {
