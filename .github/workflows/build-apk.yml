@@ -87,18 +87,66 @@ jobs:
                   "            webView.setWebChromeClient(new WebChromeClient() {\n"
                   "                @Override\n"
                   "                public void onPermissionRequest(final PermissionRequest request) {\n"
-                  "                    runOnUiThread(() -> request.grant(request.getResources()));\n"
+                  "                    // IMPORTANT : request.grant() ne DOIT être appelé que pour des\n"
+                  "                    // ressources dont la permission Android runtime correspondante\n"
+                  "                    // est déjà réellement accordée. L'appeler alors que la permission\n"
+                  "                    // système n'est pas encore accordée (ex: popup encore affiché ou\n"
+                  "                    // pas encore répondu) fait échouer/refuser silencieusement côté\n"
+                  "                    // WebView, qui peut ensuite mémoriser ce refus pour l'origine et\n"
+                  "                    // ne plus jamais redemander correctement, même une fois la\n"
+                  "                    // permission Android accordée a posteriori. On filtre donc\n"
+                  "                    // ressource par ressource. ────────────────────────────────────\n"
+                  "                    runOnUiThread(() -> {\n"
+                  "                        java.util.List<String> granted = new java.util.ArrayList<>();\n"
+                  "                        for (String res : request.getResources()) {\n"
+                  "                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)\n"
+                  "                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {\n"
+                  "                                granted.add(res);\n"
+                  "                            } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)\n"
+                  "                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {\n"
+                  "                                granted.add(res);\n"
+                  "                            }\n"
+                  "                        }\n"
+                  "                        if (!granted.isEmpty()) {\n"
+                  "                            request.grant(granted.toArray(new String[0]));\n"
+                  "                        } else {\n"
+                  "                            request.deny();\n"
+                  "                        }\n"
+                  "                    });\n"
                   "                }\n"
                   "                @Override\n"
                   "                public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {\n"
-                  "                    // onPermissionRequest (ci-dessus) ne couvre QUE le micro/caméra —\n"
-                  "                    // la géolocalisation passe par cette méthode séparée, sans\n"
-                  "                    // laquelle navigator.geolocation échoue toujours en WebView,\n"
-                  "                    // même si la permission Android système est accordée.\n"
-                  "                    runOnUiThread(() -> callback.invoke(origin, true, false));\n"
+                  "                    // Même logique que ci-dessus : on ne dit \"allow=true\" au WebView\n"
+                  "                    // que si la permission Android est réellement déjà accordée.\n"
+                  "                    boolean hasLoc = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED\n"
+                  "                        || ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;\n"
+                  "                    runOnUiThread(() -> callback.invoke(origin, hasLoc, false));\n"
                   "                }\n"
                   "            });\n"
                   "        });"
+              )
+
+              # ── onRequestPermissionsResult : une fois que l'utilisateur a répondu
+              # au popup système (Autoriser/Refuser), on recharge le WebView si au
+              # moins une permission a été accordée. Ce rechargement force le
+              # WebView à repartir sur un état propre pour l'origine de la page,
+              # plutôt que de garder en mémoire un premier refus survenu avant que
+              # l'utilisateur ait eu le temps de répondre. ─────────────────────
+              permission_result_snippet = (
+                  "\n\n    @Override\n"
+                  "    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {\n"
+                  "        super.onRequestPermissionsResult(requestCode, permissions, grantResults);\n"
+                  "        if (requestCode == 1001) {\n"
+                  "            boolean anyGranted = false;\n"
+                  "            for (int r : grantResults) {\n"
+                  "                if (r == PackageManager.PERMISSION_GRANTED) { anyGranted = true; break; }\n"
+                  "            }\n"
+                  "            if (anyGranted) {\n"
+                  "                WebView wv = this.bridge.getWebView();\n"
+                  "                if (wv != null) wv.post(wv::reload);\n"
+                  "            }\n"
+                  "        }\n"
+                  "    }"
               )
 
               if "onPermissionRequest" not in content:
@@ -119,6 +167,11 @@ jobs:
                           content,
                           count=1
                       )
+
+              if "onRequestPermissionsResult" not in content:
+                  last_brace = content.rfind("}")
+                  if last_brace != -1:
+                      content = content[:last_brace] + permission_result_snippet + "\n" + content[last_brace:]
 
               with open(path, "w") as f:
                   f.write(content)
