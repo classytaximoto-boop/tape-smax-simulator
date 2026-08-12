@@ -38,7 +38,7 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Patch MainActivity to grant WebView media permissions
+- name: Patch MainActivity to grant WebView media permissions
         run: |
           python3 - <<'EOF'
           import re, glob
@@ -62,6 +62,15 @@ jobs:
                       "import android.content.pm.PackageManager;\n"
                       "import androidx.core.app.ActivityCompat;\n"
                       "import androidx.core.content.ContextCompat;"
+                  )
+
+              if "pendingWebPermissionRequest" not in content:
+                  content = re.sub(
+                      r"(public class MainActivity extends BridgeActivity \{)",
+                      r"\1\n"
+                      r"    private PermissionRequest pendingWebPermissionRequest = null;\n",
+                      content,
+                      count=1
                   )
 
               patch_snippet = (
@@ -89,26 +98,46 @@ jobs:
                   "                public void onPermissionRequest(final PermissionRequest request) {\n"
                   "                    // IMPORTANT : request.grant() ne DOIT être appelé que pour des\n"
                   "                    // ressources dont la permission Android runtime correspondante\n"
-                  "                    // est déjà réellement accordée. L'appeler alors que la permission\n"
-                  "                    // système n'est pas encore accordée (ex: popup encore affiché ou\n"
-                  "                    // pas encore répondu) fait échouer/refuser silencieusement côté\n"
-                  "                    // WebView, qui peut ensuite mémoriser ce refus pour l'origine et\n"
-                  "                    // ne plus jamais redemander correctement, même une fois la\n"
-                  "                    // permission Android accordée a posteriori. On filtre donc\n"
-                  "                    // ressource par ressource. ────────────────────────────────────\n"
+                  "                    // est déjà réellement accordée.\n"
                   "                    runOnUiThread(() -> {\n"
-                  "                        java.util.List<String> granted = new java.util.ArrayList<>();\n"
+                  "                        boolean audioWanted = false, videoWanted = false;\n"
                   "                        for (String res : request.getResources()) {\n"
-                  "                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)\n"
-                  "                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {\n"
-                  "                                granted.add(res);\n"
-                  "                            } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)\n"
-                  "                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {\n"
-                  "                                granted.add(res);\n"
-                  "                            }\n"
+                  "                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) audioWanted = true;\n"
+                  "                            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) videoWanted = true;\n"
                   "                        }\n"
-                  "                        if (!granted.isEmpty()) {\n"
+                  "\n"
+                  "                        boolean audioGranted = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;\n"
+                  "                        boolean videoGranted = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;\n"
+                  "\n"
+                  "                        java.util.List<String> granted = new java.util.ArrayList<>();\n"
+                  "                        if (audioWanted && audioGranted) granted.add(PermissionRequest.RESOURCE_AUDIO_CAPTURE);\n"
+                  "                        if (videoWanted && videoGranted) granted.add(PermissionRequest.RESOURCE_VIDEO_CAPTURE);\n"
+                  "\n"
+                  "                        boolean stillMissing = (audioWanted && !audioGranted) || (videoWanted && !videoGranted);\n"
+                  "\n"
+                  "                        if (!stillMissing && !granted.isEmpty()) {\n"
+                  "                            // Tout ce qui est demandé est déjà accordé côté Android.\n"
                   "                            request.grant(granted.toArray(new String[0]));\n"
+                  "                            return;\n"
+                  "                        }\n"
+                  "\n"
+                  "                        // Au moins une ressource demandée n'a pas encore de permission\n"
+                  "                        // Android accordée. Plutôt que de refuser définitivement (ce qui\n"
+                  "                        // bloquait tout getUserMedia ultérieur même après acceptation),\n"
+                  "                        // on relance le popup système runtime et on met CETTE requête\n"
+                  "                        // WebView en attente : elle sera résolue (grant ou deny) plus\n"
+                  "                        // tard, une fois la réponse connue.\n"
+                  "                        java.util.List<String> toReRequest = new java.util.ArrayList<>();\n"
+                  "                        if (audioWanted && !audioGranted) toReRequest.add(Manifest.permission.RECORD_AUDIO);\n"
+                  "                        if (videoWanted && !videoGranted) toReRequest.add(Manifest.permission.CAMERA);\n"
+                  "\n"
+                  "                        if (!toReRequest.isEmpty()) {\n"
+                  "                            if (pendingWebPermissionRequest != null && pendingWebPermissionRequest != request) {\n"
+                  "                                pendingWebPermissionRequest.deny();\n"
+                  "                            }\n"
+                  "                            pendingWebPermissionRequest = request;\n"
+                  "                            ActivityCompat.requestPermissions(MainActivity.this,\n"
+                  "                                toReRequest.toArray(new String[0]), 1002);\n"
                   "                        } else {\n"
                   "                            request.deny();\n"
                   "                        }\n"
@@ -126,16 +155,32 @@ jobs:
                   "        });"
               )
 
-              # ── onRequestPermissionsResult : une fois que l'utilisateur a répondu
-              # au popup système (Autoriser/Refuser), on recharge le WebView si au
-              # moins une permission a été accordée. Ce rechargement force le
-              # WebView à repartir sur un état propre pour l'origine de la page,
-              # plutôt que de garder en mémoire un premier refus survenu avant que
-              # l'utilisateur ait eu le temps de répondre. ─────────────────────
               permission_result_snippet = (
                   "\n\n    @Override\n"
                   "    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {\n"
                   "        super.onRequestPermissionsResult(requestCode, permissions, grantResults);\n"
+                  "\n"
+                  "        if (requestCode == 1002) {\n"
+                  "            PermissionRequest req = pendingWebPermissionRequest;\n"
+                  "            pendingWebPermissionRequest = null;\n"
+                  "            if (req == null) return;\n"
+                  "\n"
+                  "            boolean audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;\n"
+                  "            boolean videoGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;\n"
+                  "\n"
+                  "            java.util.List<String> granted = new java.util.ArrayList<>();\n"
+                  "            for (String res : req.getResources()) {\n"
+                  "                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) && audioGranted) granted.add(res);\n"
+                  "                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) && videoGranted) granted.add(res);\n"
+                  "            }\n"
+                  "            if (!granted.isEmpty()) {\n"
+                  "                req.grant(granted.toArray(new String[0]));\n"
+                  "            } else {\n"
+                  "                req.deny();\n"
+                  "            }\n"
+                  "            return;\n"
+                  "        }\n"
+                  "\n"
                   "        if (requestCode == 1001) {\n"
                   "            boolean anyGranted = false;\n"
                   "            for (int r : grantResults) {\n"
