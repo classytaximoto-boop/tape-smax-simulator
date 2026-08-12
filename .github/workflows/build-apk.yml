@@ -38,7 +38,7 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
-- name: Patch MainActivity to grant WebView media permissions
+      - name: Patch MainActivity to grant WebView media permissions
         run: |
           python3 - <<'EOF'
           import re, glob
