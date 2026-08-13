@@ -146,19 +146,8 @@ jobs:
                   "                        if (videoWanted && !videoGranted) toReRequest.add(Manifest.permission.CAMERA);\n"
                   "\n"
                   "                        if (!toReRequest.isEmpty()) {\n"
-                  "                            // IMPORTANT : si une requête WebView est déjà EN ATTENTE\n"
-                  "                            // d'une réponse au popup système Android runtime (popup\n"
-                  "                            // encore affiché à l'écran, l'utilisateur n'a pas encore\n"
-                  "                            // cliqué Autoriser/Refuser), on NE LA REMPLACE PAS par cette\n"
-                  "                            // nouvelle requête. La remplacer ici la fait deny() alors que\n"
-                  "                            // l'utilisateur est justement en train de répondre au popup\n"
-                  "                            // qui lui correspond : son clic \"Autoriser\" résout alors une\n"
-                  "                            // requête WebView déjà annulée, donc le micro reste refusé\n"
-                  "                            // malgré l'acceptation. On ignore simplement ce doublon (le\n"
-                  "                            // JS ne devrait normalement pas relancer un 2e getUserMedia()\n"
-                  "                            // avant la fin du 1er, mais on se protège quand même ici).\n"
-                  "                            if (pendingWebPermissionRequest != null) {\n"
-                  "                                return;\n"
+                  "                            if (pendingWebPermissionRequest != null && pendingWebPermissionRequest != request) {\n"
+                  "                                pendingWebPermissionRequest.deny();\n"
                   "                            }\n"
                   "                            pendingWebPermissionRequest = request;\n"
                   "                            ActivityCompat.requestPermissions(MainActivity.this,\n"
@@ -190,8 +179,26 @@ jobs:
                   "            pendingWebPermissionRequest = null;\n"
                   "            if (req == null) return;\n"
                   "\n"
-                  "            boolean audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;\n"
-                  "            boolean videoGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;\n"
+                  "            // IMPORTANT : on lit le résultat directement depuis permissions[]/\n"
+                  "            // grantResults[] (la réponse exacte et synchrone que le système vient\n"
+                  "            // de renvoyer pour CETTE demande), plutôt que de rappeler\n"
+                  "            // checkSelfPermission() ici. Sur plusieurs surcouches Android\n"
+                  "            // (MIUI/Xiaomi, ColorOS/Oppo, et d'autres avec des réglages de\n"
+                  "            // confidentialité renforcés), checkSelfPermission() peut encore\n"
+                  "            // renvoyer DENIED une fraction de seconde après que l'utilisateur a\n"
+                  "            // accepté le popup — le nouvel état de permission n'a pas fini de se\n"
+                  "            // propager côté système au moment où ce callback s'exécute. Résultat\n"
+                  "            // observé : le popup système s'affiche, l'utilisateur tape\n"
+                  "            // \"Autoriser\", mais request.deny() est quand même appelé et\n"
+                  "            // Réglages → Apps → Autorisations affiche Micro = Refusé alors que\n"
+                  "            // l'utilisateur vient d'accepter. grantResults[] ne souffre pas de ce\n"
+                  "            // délai de propagation : c'est la réponse déjà tranchée.\n"
+                  "            boolean audioGranted = false, videoGranted = false;\n"
+                  "            for (int i = 0; i < permissions.length; i++) {\n"
+                  "                boolean isGranted = i < grantResults.length && grantResults[i] == PackageManager.PERMISSION_GRANTED;\n"
+                  "                if (Manifest.permission.RECORD_AUDIO.equals(permissions[i]) && isGranted) audioGranted = true;\n"
+                  "                if (Manifest.permission.CAMERA.equals(permissions[i]) && isGranted) videoGranted = true;\n"
+                  "            }\n"
                   "\n"
                   "            java.util.List<String> granted = new java.util.ArrayList<>();\n"
                   "            for (String res : req.getResources()) {\n"
@@ -253,6 +260,18 @@ jobs:
 
       - name: Prepare source assets for icon/splash generation
         run: |
+          # @capacitor/assets generate --android ne lit PAS icon-192.png /
+          # icon-512.png (ceux-là servent uniquement au manifest.json du
+          # PWA web). Il exige ses PROPRES fichiers sources dans un dossier
+          # assets/ dédié à la racine du repo :
+          #   assets/icon.png    (minimum 1024x1024px, carré, exigé par l'outil)
+          #   assets/splash.png  (optionnel, sinon un splash par défaut est
+          #                       généré)
+          # Si ce dossier n'existe pas, ou si l'icône source est plus
+          # petite que 1024x1024, la commande échoue silencieusement
+          # (erreur noyée dans les warnings npm de l'installation à la
+          # volée du package @capacitor/assets), ce qui donnait
+          # "exit code 1" sans explication claire.
           mkdir -p assets
           if [ ! -f icon-512.png ]; then
             echo "ERREUR : icon-512.png introuvable à la racine du repo."
@@ -269,6 +288,11 @@ jobs:
           w, h = src.size
           print(f"Icône source détectée : icon-512.png = {w}x{h}px, mode {src.mode}")
 
+          # @capacitor/assets exige un minimum de 1024x1024px pour les
+          # icônes sources. icon-512.png (512x512) est trop petit et fait
+          # planter l'outil sans message clair. On agrandit donc à 1024x1024
+          # (upscale simple, qualité suffisante pour une icône d'app —
+          # ce n'est pas destiné à être imprimé en grand format).
           target = 1024
           side = max(w, h, target)
           resized = src.resize((side, side), Image.LANCZOS)
