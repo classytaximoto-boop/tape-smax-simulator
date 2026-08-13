@@ -1,4 +1,4 @@
-name: Build Yamaha Smax APK (enhanced)
+name: Build Yamaha Smax APK
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -18,10 +19,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Install Capacitor Android
         run: npm install @capacitor/android@6.1.2
@@ -32,26 +37,37 @@ jobs:
             npx cap add android
           fi
 
-      - name: Copy web files and sync
-        run: |
-          npx cap copy android
-          npx cap sync android
+      - name: Copy web files to Android
+        run: npx cap copy android
 
-      - name: Add microphone permission (robust)
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Add microphone permission
         run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          PERM='<uses-permission android:name="android.permission.RECORD_AUDIO" />'
-          if ! grep -q "$PERM" "$MANIFEST"; then
-            sed -i "/<manifest /a \    $PERM" "$MANIFEST"
-          fi
-          cat "$MANIFEST"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/src/main/AndroidManifest.xml")
+
+          text = p.read_text()
+
+          permission = '<uses-permission android:name="android.permission.RECORD_AUDIO" />'
+
+          if permission not in text:
+              pos = text.find('>') + 1
+              text = text[:pos] + '\n    ' + permission + text[pos:]
+
+              p.write_text(text)
+
+          print(p.read_text())
+          PY
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -59,36 +75,13 @@ jobs:
       - name: Accept Android licenses
         run: yes | sdkmanager --licenses || true
 
-      # Optionnel : build release avec signature (désactivé par défaut)
-      # - name: Decode keystore
-      #   run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-      - name: Build debug APK
+      - name: Build APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
 
-      # Optionnel : build release
-      # - name: Build release APK
-      #   working-directory: android
-      #   run: ./gradlew assembleRelease --no-daemon
-      #   env:
-      #     KEYSTORE_FILE: ${{ github.workspace }}/keystore.jks
-      #     KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      #     KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-      #     KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-
-      - name: Upload APK (debug)
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Yamaha-Smax-APK-debug
+          name: Yamaha-Smax-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-      # Optionnel : upload release
-      # - name: Upload APK (release)
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: Yamaha-Smax-APK-release
-      #     path: android/app/build/outputs/apk/release/app-release.apk
-      #     if-no-files-found: error
