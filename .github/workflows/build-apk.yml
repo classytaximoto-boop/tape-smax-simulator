@@ -1,379 +1,89 @@
-name: Build APK
+name: Build Yamaha Smax APK
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
+          cache: npm
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install npm dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: Prepare www folder
-        run: |
-          mkdir -p www
-          cp Yamaha_Smax.html www/index.html
-          cp manifest.json www/ || true
-          cp icon-192.png www/ || true
-          cp icon-512.png www/ || true
-          cp engine_coolant_photo.jpg www/ || true
+      - name: Install Capacitor Android
+        run: npm install @capacitor/android@6.1.2
 
       - name: Add Android platform
-        run: npx cap add android
-
-      - name: Patch MainActivity to grant WebView media permissions
         run: |
-          python3 - <<'EOF'
-          import re, glob
-          matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
-          if not matches:
-              print("WARNING: MainActivity.java not found, skipping")
-          else:
-              path = matches[0]
-              with open(path) as f:
-                  content = f.read()
-
-              if "import android.webkit.PermissionRequest;" not in content:
-                  content = content.replace(
-                      "import com.getcapacitor.BridgeActivity;",
-                      "import com.getcapacitor.BridgeActivity;\n"
-                      "import android.webkit.PermissionRequest;\n"
-                      "import android.webkit.WebChromeClient;\n"
-                      "import android.webkit.WebView;\n"
-                      "import android.webkit.GeolocationPermissions;\n"
-                      "import android.Manifest;\n"
-                      "import android.content.pm.PackageManager;\n"
-                      "import androidx.core.app.ActivityCompat;\n"
-                      "import androidx.core.content.ContextCompat;"
-                  )
-
-              if "pendingWebPermissionRequest" not in content:
-                  content = re.sub(
-                      r"(public class MainActivity extends BridgeActivity \{)",
-                      r"\1\n"
-                      r"    private PermissionRequest pendingWebPermissionRequest = null;\n",
-                      content,
-                      count=1
-                  )
-
-              patch_snippet = (
-                  "\n        // Permissions runtime Android (popup système), nécessaires en plus\n"
-                  "        // du <uses-permission> du manifeste sur Android 6+.\n"
-                  "        //\n"
-                  "        // IMPORTANT : on NE demande PAS RECORD_AUDIO/CAMERA ici, au démarrage.\n"
-                  "        // Si on le fait, le popup système apparaît dès l'ouverture de l'app,\n"
-                  "        // hors contexte (l'utilisateur ne sait pas encore pourquoi le micro\n"
-                  "        // est demandé) — beaucoup de gens refusent par réflexe à ce moment-là.\n"
-                  "        // Or Android bloque ensuite tout re-déclenchement AUTOMATIQUE du popup\n"
-                  "        // pour cette permission une fois refusée une première fois : le bouton\n"
-                  "        // micro dans l'app reste alors cassé en PERMANENCE, même si\n"
-                  "        // l'utilisateur clique dessus plus tard et pense l'autoriser — car\n"
-                  "        // onPermissionRequest() voit la permission Android déjà DENIED et\n"
-                  "        // appelle request.deny() silencieusement à chaque tentative.\n"
-                  "        // RECORD_AUDIO/CAMERA sont donc demandées PLUS BAS, à la volée dans\n"
-                  "        // onPermissionRequest(), déclenché uniquement quand l'utilisateur\n"
-                  "        // appuie réellement sur le bouton micro/caméra dans l'app — c'est le\n"
-                  "        // seul moment où le contexte justifie le popup et où Android autorise\n"
-                  "        // encore un nouveau prompt.\n"
-                  "        String[] neededPerms = new String[] {\n"
-                  "            Manifest.permission.ACCESS_FINE_LOCATION,\n"
-                  "            Manifest.permission.ACCESS_COARSE_LOCATION\n"
-                  "        };\n"
-                  "        java.util.List<String> toRequest = new java.util.ArrayList<>();\n"
-                  "        for (String p : neededPerms) {\n"
-                  "            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {\n"
-                  "                toRequest.add(p);\n"
-                  "            }\n"
-                  "        }\n"
-                  "        if (!toRequest.isEmpty()) {\n"
-                  "            ActivityCompat.requestPermissions(this, toRequest.toArray(new String[0]), 1001);\n"
-                  "        }\n"
-                  "\n        WebView webView = this.bridge.getWebView();\n"
-                  "        webView.post(() -> {\n"
-                  "            webView.setWebChromeClient(new WebChromeClient() {\n"
-                  "                @Override\n"
-                  "                public void onPermissionRequest(final PermissionRequest request) {\n"
-                  "                    // IMPORTANT : request.grant() ne DOIT être appelé que pour des\n"
-                  "                    // ressources dont la permission Android runtime correspondante\n"
-                  "                    // est déjà réellement accordée.\n"
-                  "                    runOnUiThread(() -> {\n"
-                  "                        boolean audioWanted = false, videoWanted = false;\n"
-                  "                        for (String res : request.getResources()) {\n"
-                  "                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) audioWanted = true;\n"
-                  "                            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) videoWanted = true;\n"
-                  "                        }\n"
-                  "\n"
-                  "                        boolean audioGranted = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;\n"
-                  "                        boolean videoGranted = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;\n"
-                  "\n"
-                  "                        java.util.List<String> granted = new java.util.ArrayList<>();\n"
-                  "                        if (audioWanted && audioGranted) granted.add(PermissionRequest.RESOURCE_AUDIO_CAPTURE);\n"
-                  "                        if (videoWanted && videoGranted) granted.add(PermissionRequest.RESOURCE_VIDEO_CAPTURE);\n"
-                  "\n"
-                  "                        boolean stillMissing = (audioWanted && !audioGranted) || (videoWanted && !videoGranted);\n"
-                  "\n"
-                  "                        if (!stillMissing && !granted.isEmpty()) {\n"
-                  "                            // Tout ce qui est demandé est déjà accordé côté Android.\n"
-                  "                            request.grant(granted.toArray(new String[0]));\n"
-                  "                            return;\n"
-                  "                        }\n"
-                  "\n"
-                  "                        // Au moins une ressource demandée n'a pas encore de permission\n"
-                  "                        // Android accordée. Plutôt que de refuser définitivement (ce qui\n"
-                  "                        // bloquait tout getUserMedia ultérieur même après acceptation),\n"
-                  "                        // on relance le popup système runtime et on met CETTE requête\n"
-                  "                        // WebView en attente : elle sera résolue (grant ou deny) plus\n"
-                  "                        // tard, une fois la réponse connue.\n"
-                  "                        java.util.List<String> toReRequest = new java.util.ArrayList<>();\n"
-                  "                        if (audioWanted && !audioGranted) toReRequest.add(Manifest.permission.RECORD_AUDIO);\n"
-                  "                        if (videoWanted && !videoGranted) toReRequest.add(Manifest.permission.CAMERA);\n"
-                  "\n"
-                  "                        if (!toReRequest.isEmpty()) {\n"
-                  "                            if (pendingWebPermissionRequest != null && pendingWebPermissionRequest != request) {\n"
-                  "                                pendingWebPermissionRequest.deny();\n"
-                  "                            }\n"
-                  "                            pendingWebPermissionRequest = request;\n"
-                  "                            ActivityCompat.requestPermissions(MainActivity.this,\n"
-                  "                                toReRequest.toArray(new String[0]), 1002);\n"
-                  "                        } else {\n"
-                  "                            request.deny();\n"
-                  "                        }\n"
-                  "                    });\n"
-                  "                }\n"
-                  "                @Override\n"
-                  "                public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {\n"
-                  "                    // Même logique que ci-dessus : on ne dit \"allow=true\" au WebView\n"
-                  "                    // que si la permission Android est réellement déjà accordée.\n"
-                  "                    boolean hasLoc = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED\n"
-                  "                        || ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;\n"
-                  "                    runOnUiThread(() -> callback.invoke(origin, hasLoc, false));\n"
-                  "                }\n"
-                  "            });\n"
-                  "        });"
-              )
-
-              permission_result_snippet = (
-                  "\n\n    @Override\n"
-                  "    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {\n"
-                  "        super.onRequestPermissionsResult(requestCode, permissions, grantResults);\n"
-                  "\n"
-                  "        if (requestCode == 1002) {\n"
-                  "            PermissionRequest req = pendingWebPermissionRequest;\n"
-                  "            pendingWebPermissionRequest = null;\n"
-                  "            if (req == null) return;\n"
-                  "\n"
-                  "            boolean audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;\n"
-                  "            boolean videoGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;\n"
-                  "\n"
-                  "            java.util.List<String> granted = new java.util.ArrayList<>();\n"
-                  "            for (String res : req.getResources()) {\n"
-                  "                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) && audioGranted) granted.add(res);\n"
-                  "                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) && videoGranted) granted.add(res);\n"
-                  "            }\n"
-                  "            if (!granted.isEmpty()) {\n"
-                  "                req.grant(granted.toArray(new String[0]));\n"
-                  "            } else {\n"
-                  "                req.deny();\n"
-                  "            }\n"
-                  "            return;\n"
-                  "        }\n"
-                  "\n"
-                  "        if (requestCode == 1001) {\n"
-                  "            boolean anyGranted = false;\n"
-                  "            for (int r : grantResults) {\n"
-                  "                if (r == PackageManager.PERMISSION_GRANTED) { anyGranted = true; break; }\n"
-                  "            }\n"
-                  "            if (anyGranted) {\n"
-                  "                WebView wv = this.bridge.getWebView();\n"
-                  "                if (wv != null) wv.post(wv::reload);\n"
-                  "            }\n"
-                  "        }\n"
-                  "    }"
-              )
-
-              if "onPermissionRequest" not in content:
-                  if "super.onCreate(savedInstanceState);" in content:
-                      content = content.replace(
-                          "super.onCreate(savedInstanceState);",
-                          "super.onCreate(savedInstanceState);" + patch_snippet,
-                          1
-                      )
-                  else:
-                      content = re.sub(
-                          r"(public class MainActivity extends BridgeActivity \{)",
-                          r"\1\n"
-                          r"    @Override\n"
-                          r"    protected void onCreate(android.os.Bundle savedInstanceState) {\n"
-                          r"        super.onCreate(savedInstanceState);" + patch_snippet + "\n"
-                          r"    }\n",
-                          content,
-                          count=1
-                      )
-
-              if "onRequestPermissionsResult" not in content:
-                  last_brace = content.rfind("}")
-                  if last_brace != -1:
-                      content = content[:last_brace] + permission_result_snippet + "\n" + content[last_brace:]
-
-              with open(path, "w") as f:
-                  f.write(content)
-              print("MainActivity.java patched:", path)
-              print("----- FULL FILE CONTENT -----")
-              print(content)
-              print("----- END FILE CONTENT -----")
-          EOF
-
-      - name: Prepare source assets for icon/splash generation
-        run: |
-          # @capacitor/assets generate --android ne lit PAS icon-192.png /
-          # icon-512.png (ceux-là servent uniquement au manifest.json du
-          # PWA web). Il exige ses PROPRES fichiers sources dans un dossier
-          # assets/ dédié à la racine du repo :
-          #   assets/icon.png    (minimum 1024x1024px, carré, exigé par l'outil)
-          #   assets/splash.png  (optionnel, sinon un splash par défaut est
-          #                       généré)
-          # Si ce dossier n'existe pas, ou si l'icône source est plus
-          # petite que 1024x1024, la commande échoue silencieusement
-          # (erreur noyée dans les warnings npm de l'installation à la
-          # volée du package @capacitor/assets), ce qui donnait
-          # "exit code 1" sans explication claire.
-          mkdir -p assets
-          if [ ! -f icon-512.png ]; then
-            echo "ERREUR : icon-512.png introuvable à la racine du repo."
-            echo "@capacitor/assets a besoin d'un fichier source carré (min 1024x1024)"
-            echo "pour générer les icônes natives Android."
-            exit 1
+          if [ ! -d "android" ]; then
+            npx cap add android
           fi
 
-          pip install --break-system-packages --quiet Pillow
-
-          python3 - <<'EOF'
-          from PIL import Image
-          src = Image.open("icon-512.png").convert("RGBA")
-          w, h = src.size
-          print(f"Icône source détectée : icon-512.png = {w}x{h}px, mode {src.mode}")
-
-          # @capacitor/assets exige un minimum de 1024x1024px pour les
-          # icônes sources. icon-512.png (512x512) est trop petit et fait
-          # planter l'outil sans message clair. On agrandit donc à 1024x1024
-          # (upscale simple, qualité suffisante pour une icône d'app —
-          # ce n'est pas destiné à être imprimé en grand format).
-          target = 1024
-          side = max(w, h, target)
-          resized = src.resize((side, side), Image.LANCZOS)
-          resized.save("assets/icon.png")
-          print(f"assets/icon.png créé : {side}x{side}px")
-          EOF
-
-          echo "----- Contenu de assets/ -----"
-          ls -la assets/
-          file assets/icon.png
-
-      - name: Generate native icons & splash screen
-        run: |
-          set -x
-          npx @capacitor/assets generate --android --assetPath assets 2>&1
-          exit_code=$?
-          echo "Exit code: $exit_code"
-          exit $exit_code
-
-      - name: Add native permissions
-        run: |
-          python3 - <<'EOF'
-          import re
-          path = "android/app/src/main/AndroidManifest.xml"
-          with open(path) as f:
-              content = f.read()
-          perms = """
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-              <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
-              <uses-permission android:name="android.permission.CAMERA" />
-              <uses-permission android:name="android.permission.RECORD_AUDIO" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-              <uses-permission android:name="android.permission.WAKE_LOCK" />
-              <uses-feature android:name="android.hardware.camera" android:required="false" />
-              <uses-feature android:name="android.hardware.location.gps" android:required="false" />
-          """
-          content = re.sub(r'(<manifest[^>]*>)', r'\1' + perms, content, count=1)
-          with open(path, "w") as f:
-              f.write(content)
-          EOF
-
-      - name: Set status bar & navigation bar color
-        run: |
-          python3 - <<'EOF'
-          path = "android/app/src/main/res/values/styles.xml"
-          with open(path) as f:
-              content = f.read()
-
-          items = (
-              '\n        <item name="android:statusBarColor">#f4d000</item>'
-              '\n        <item name="android:navigationBarColor">#f4d000</item>'
-              '\n        <item name="android:windowLightStatusBar">true</item>'
-              '\n        <item name="android:windowLightNavigationBar">true</item>'
-          )
-
-          idx = content.find("</style>")
-          if idx != -1:
-              content = content[:idx] + items + "\n    " + content[idx:]
-              with open(path, "w") as f:
-                  f.write(content)
-              print("styles.xml patched")
-          else:
-              print("WARNING: </style> not found, styles.xml left unchanged")
-          EOF
-
-      - name: Pin target/compile SDK to 34
-        run: |
-          python3 - <<'EOF'
-          import re
-          path = "android/variables.gradle"
-          try:
-              with open(path) as f:
-                  content = f.read()
-          except FileNotFoundError:
-              print("variables.gradle not found, skipping")
-          else:
-              content = re.sub(r"compileSdkVersion\s*=\s*\d+", "compileSdkVersion = 34", content)
-              content = re.sub(r"targetSdkVersion\s*=\s*\d+", "targetSdkVersion = 34", content)
-              with open(path, "w") as f:
-                  f.write(content)
-              print("variables.gradle patched to SDK 34")
-          EOF
+      - name: Copy web files to Android
+        run: npx cap copy android
 
       - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x android/gradlew
-
-      - name: Build debug APK
+      - name: Add microphone permission
         run: |
-          cd android
-          ./gradlew assembleDebug
+          python3 - <<'PY'
+          from pathlib import Path
 
-      - name: Upload APK artifact
+          p = Path("android/app/src/main/AndroidManifest.xml")
+
+          text = p.read_text()
+
+          permission = '<uses-permission android:name="android.permission.RECORD_AUDIO" />'
+
+          if permission not in text:
+              text = text.replace(
+                  '<manifest',
+                  '<manifest',
+                  1
+              )
+
+              pos = text.find('>') + 1
+              text = text[:pos] + '\n    ' + permission + text[pos:]
+
+              p.write_text(text)
+
+          print(p.read_text())
+          PY
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: smax155-app-debug
+          name: Yamaha-Smax-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
