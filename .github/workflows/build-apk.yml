@@ -289,7 +289,7 @@ jobs:
       - name: Generate native icons & splash screen
         run: |
           set -x
-          npx @capacitor/assets generate --android --asset-path assets 2>&1
+          npx @capacitor/assets generate --android --assetPath assets 2>&1
           exit_code=$?
           echo "Exit code: $exit_code"
           exit $exit_code
