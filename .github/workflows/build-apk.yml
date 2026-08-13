@@ -240,8 +240,59 @@ jobs:
               print("----- END FILE CONTENT -----")
           EOF
 
+      - name: Prepare source assets for icon/splash generation
+        run: |
+          # @capacitor/assets generate --android ne lit PAS icon-192.png /
+          # icon-512.png (ceux-là servent uniquement au manifest.json du
+          # PWA web). Il exige ses PROPRES fichiers sources dans un dossier
+          # assets/ dédié à la racine du repo :
+          #   assets/icon.png    (minimum 1024x1024px, carré, exigé par l'outil)
+          #   assets/splash.png  (optionnel, sinon un splash par défaut est
+          #                       généré)
+          # Si ce dossier n'existe pas, ou si l'icône source est plus
+          # petite que 1024x1024, la commande échoue silencieusement
+          # (erreur noyée dans les warnings npm de l'installation à la
+          # volée du package @capacitor/assets), ce qui donnait
+          # "exit code 1" sans explication claire.
+          mkdir -p assets
+          if [ ! -f icon-512.png ]; then
+            echo "ERREUR : icon-512.png introuvable à la racine du repo."
+            echo "@capacitor/assets a besoin d'un fichier source carré (min 1024x1024)"
+            echo "pour générer les icônes natives Android."
+            exit 1
+          fi
+
+          pip install --break-system-packages --quiet Pillow
+
+          python3 - <<'EOF'
+          from PIL import Image
+          src = Image.open("icon-512.png").convert("RGBA")
+          w, h = src.size
+          print(f"Icône source détectée : icon-512.png = {w}x{h}px, mode {src.mode}")
+
+          # @capacitor/assets exige un minimum de 1024x1024px pour les
+          # icônes sources. icon-512.png (512x512) est trop petit et fait
+          # planter l'outil sans message clair. On agrandit donc à 1024x1024
+          # (upscale simple, qualité suffisante pour une icône d'app —
+          # ce n'est pas destiné à être imprimé en grand format).
+          target = 1024
+          side = max(w, h, target)
+          resized = src.resize((side, side), Image.LANCZOS)
+          resized.save("assets/icon.png")
+          print(f"assets/icon.png créé : {side}x{side}px")
+          EOF
+
+          echo "----- Contenu de assets/ -----"
+          ls -la assets/
+          file assets/icon.png
+
       - name: Generate native icons & splash screen
-        run: npx @capacitor/assets generate --android
+        run: |
+          set -x
+          npx @capacitor/assets generate --android --asset-path assets 2>&1
+          exit_code=$?
+          echo "Exit code: $exit_code"
+          exit $exit_code
 
       - name: Add native permissions
         run: |
