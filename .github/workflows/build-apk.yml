@@ -26,6 +26,15 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
+      - name: Install background geolocation plugin
+        # IMPORTANT : sans ce package installé AVANT `npx cap add android`,
+        # window.Capacitor.Plugins.BackgroundGeolocation reste undefined
+        # dans l'app (NativeGpsNotif.getPlugin() ne trouve jamais rien) —
+        # aucune notification GPS n'apparaît, silencieusement, sans erreur
+        # visible côté JS ni côté build. `npx cap sync` synchronise les
+        # plugins déjà présents dans node_modules, il ne les installe pas.
+        run: npm install @capacitor-community/background-geolocation
+
       - name: Prepare www folder
         run: |
           mkdir -p www
@@ -602,6 +611,60 @@ jobs:
           JAVAEOF
           echo "GpsNotifPlugin.java créé dans $PKG_DIR"
           ls -la "$PKG_DIR"
+
+      - name: Register GpsNotif plugin in MainActivity
+        run: |
+          python3 - <<'EOF'
+          import re, glob
+          matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
+          if not matches:
+              print("WARNING: MainActivity.java not found, skipping GpsNotif registration")
+          else:
+              path = matches[0]
+              with open(path) as f:
+                  content = f.read()
+
+              # ── Un plugin @CapacitorPlugin annoté ne suffit PAS à lui seul :
+              # il doit être explicitement déclaré via registerPlugin(...) avant
+              # super.onCreate(), sinon window.Capacitor.Plugins.GpsNotif reste
+              # undefined côté JS, même si le fichier .java compile et existe
+              # bien dans l'APK. C'est le bug exact observé : le plugin est
+              # créé (step précédente) mais jamais branché au bridge Capacitor.
+              if "import com.hery.smax155.GpsNotifPlugin;" not in content:
+                  content = content.replace(
+                      "import com.getcapacitor.BridgeActivity;",
+                      "import com.getcapacitor.BridgeActivity;\n"
+                      "import com.hery.smax155.GpsNotifPlugin;"
+                  )
+
+              if "registerPlugin(GpsNotifPlugin.class);" not in content:
+                  if "super.onCreate(savedInstanceState);" in content:
+                      # registerPlugin() doit être appelé AVANT super.onCreate()
+                      # (c'est la règle Capacitor pour tous les plugins custom),
+                      # donc on l'insère juste avant plutôt qu'après.
+                      content = content.replace(
+                          "super.onCreate(savedInstanceState);",
+                          "registerPlugin(GpsNotifPlugin.class);\n        super.onCreate(savedInstanceState);",
+                          1
+                      )
+                  else:
+                      content = re.sub(
+                          r"(public class MainActivity extends BridgeActivity \{)",
+                          r"\1\n"
+                          r"    @Override\n"
+                          r"    protected void onCreate(android.os.Bundle savedInstanceState) {\n"
+                          r"        registerPlugin(GpsNotifPlugin.class);\n"
+                          r"        super.onCreate(savedInstanceState);\n"
+                          r"    }\n",
+                          content,
+                          count=1
+                      )
+
+              with open(path, "w") as f:
+                  f.write(content)
+              print("MainActivity.java : GpsNotifPlugin enregistré dans", path)
+          EOF
+
       - name: Set status bar & navigation bar color
         run: |
           python3 - <<'EOF'
