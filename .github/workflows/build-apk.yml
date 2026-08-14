@@ -58,17 +58,36 @@ jobs:
                       "import android.webkit.WebChromeClient;\n"
                       "import android.webkit.WebView;\n"
                       "import android.webkit.GeolocationPermissions;\n"
+                      "import android.webkit.ValueCallback;\n"
+                      "import android.content.Intent;\n"
                       "import android.Manifest;\n"
                       "import android.content.pm.PackageManager;\n"
                       "import androidx.core.app.ActivityCompat;\n"
                       "import androidx.core.content.ContextCompat;"
                   )
 
+              if "filePathCallback" not in content:
+                  content = re.sub(
+                      r"(public class MainActivity extends BridgeActivity \{)",
+                      r"\1\n"
+                      r"    private ValueCallback<Uri[]> filePathCallback = null;\n"
+                      r"    private static final int FILE_CHOOSER_REQUEST_CODE = 1003;\n",
+                      content,
+                      count=1
+                  )
+                  # android.net.Uri est utilisé dans le type générique ci-dessus.
+                  if "import android.net.Uri;" not in content:
+                      content = content.replace(
+                          "import android.content.Intent;",
+                          "import android.content.Intent;\nimport android.net.Uri;"
+                      )
+
               if "pendingWebPermissionRequest" not in content:
                   content = re.sub(
                       r"(public class MainActivity extends BridgeActivity \{)",
                       r"\1\n"
-                      r"    private PermissionRequest pendingWebPermissionRequest = null;\n",
+                      r"    private PermissionRequest pendingWebPermissionRequest = null;\n"
+                      r"    private long pendingWebPermissionRequestAtMs = 0;\n",
                       content,
                       count=1
                   )
@@ -214,10 +233,30 @@ jobs:
                   "                            // WebView tant que l'ancienne n'est pas résolue : le JS\n"
                   "                            // (micRequestStream/toggleMicDetector) retente déjà tout\n"
                   "                            // seul après un délai suffisant.\n"
+                  "                            //\n"
+                  "                            // CORRECTIF : si l'utilisateur ferme/ignore le popup système\n"
+                  "                            // sans jamais répondre (retour arrière, verrouillage d'écran,\n"
+                  "                            // changement d'app), onRequestPermissionsResult() peut ne\n"
+                  "                            // JAMAIS être appelé pour cette requête — pendingWebPermissionRequest\n"
+                  "                            // restait alors bloqué à une valeur non-null pour toujours,\n"
+                  "                            // et TOUTES les tentatives suivantes (même après avoir accepté\n"
+                  "                            // la permission une fois) tombaient dans ce bloc et étaient\n"
+                  "                            // ignorées silencieusement en aval, sans jamais grant() ni\n"
+                  "                            // deny() la nouvelle requête — le popup se réaffichait, le clic\n"
+                  "                            // \"Autoriser\" n'avait plus aucun effet observable. On détecte\n"
+                  "                            // donc une requête bloquée depuis trop longtemps et on la\n"
+                  "                            // refuse explicitement pour libérer la voie à celle-ci. ─────\n"
+                  "                            long now = android.os.SystemClock.elapsedRealtime();\n"
+                  "                            if (pendingWebPermissionRequest != null\n"
+                  "                                && (now - pendingWebPermissionRequestAtMs) > 15000) {\n"
+                  "                                try { pendingWebPermissionRequest.deny(); } catch (Exception ignored) {}\n"
+                  "                                pendingWebPermissionRequest = null;\n"
+                  "                            }\n"
                   "                            if (pendingWebPermissionRequest != null) {\n"
                   "                                return;\n"
                   "                            }\n"
                   "                            pendingWebPermissionRequest = request;\n"
+                  "                            pendingWebPermissionRequestAtMs = now;\n"
                   "                            ActivityCompat.requestPermissions(MainActivity.this,\n"
                   "                                toReRequest.toArray(new String[0]), 1002);\n"
                   "                        } else {\n"
@@ -232,6 +271,28 @@ jobs:
                   "                    boolean hasLoc = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED\n"
                   "                        || ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;\n"
                   "                    runOnUiThread(() -> callback.invoke(origin, hasLoc, false));\n"
+                  "                }\n"
+                  "                @Override\n"
+                  "                public boolean onShowFileChooser(WebView webViewParam, ValueCallback<Uri[]> filePathCallbackParam, FileChooserParams fileChooserParams) {\n"
+                  "                    // IMPORTANT : sans cette surcharge, un WebView Android natif\n"
+                  "                    // ignore SILENCIEUSEMENT tout clic JS sur <input type=\"file\">\n"
+                  "                    // (comme le bouton \"Importer\" de smaxImportData()) — le clic JS\n"
+                  "                    // part bien (input.click() s'exécute), mais aucun sélecteur de\n"
+                  "                    // fichiers système ne s'ouvre jamais, sans la moindre erreur JS.\n"
+                  "                    // C'est le pendant exact du DownloadListener ci-dessus, mais pour\n"
+                  "                    // l'upload plutôt que le download.\n"
+                  "                    if (MainActivity.this.filePathCallback != null) {\n"
+                  "                        MainActivity.this.filePathCallback.onReceiveValue(null);\n"
+                  "                    }\n"
+                  "                    MainActivity.this.filePathCallback = filePathCallbackParam;\n"
+                  "                    Intent intent = fileChooserParams.createIntent();\n"
+                  "                    try {\n"
+                  "                        startActivityForResult(intent, FILE_CHOOSER_REQUEST_CODE);\n"
+                  "                    } catch (android.content.ActivityNotFoundException e) {\n"
+                  "                        MainActivity.this.filePathCallback = null;\n"
+                  "                        return false;\n"
+                  "                    }\n"
+                  "                    return true;\n"
                   "                }\n"
                   "            });\n"
                   "        });"
@@ -313,10 +374,35 @@ jobs:
                           count=1
                       )
 
+              activity_result_snippet = (
+                  "\n\n    @Override\n"
+                  "    public void onActivityResult(int requestCode, int resultCode, Intent data) {\n"
+                  "        super.onActivityResult(requestCode, resultCode, data);\n"
+                  "        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {\n"
+                  "            if (filePathCallback == null) return;\n"
+                  "            Uri[] results = null;\n"
+                  "            if (resultCode == RESULT_OK && data != null) {\n"
+                  "                String dataString = data.getDataString();\n"
+                  "                if (dataString != null) {\n"
+                  "                    results = new Uri[]{ Uri.parse(dataString) };\n"
+                  "                } else if (data.getClipData() != null) {\n"
+                  "                    int count = data.getClipData().getItemCount();\n"
+                  "                    results = new Uri[count];\n"
+                  "                    for (int i = 0; i < count; i++) {\n"
+                  "                        results[i] = data.getClipData().getItemAt(i).getUri();\n"
+                  "                    }\n"
+                  "                }\n"
+                  "            }\n"
+                  "            filePathCallback.onReceiveValue(results);\n"
+                  "            filePathCallback = null;\n"
+                  "        }\n"
+                  "    }"
+              )
+
               if "onRequestPermissionsResult" not in content:
                   last_brace = content.rfind("}")
                   if last_brace != -1:
-                      content = content[:last_brace] + permission_result_snippet + "\n" + content[last_brace:]
+                      content = content[:last_brace] + permission_result_snippet + activity_result_snippet + "\n" + content[last_brace:]
 
               with open(path, "w") as f:
                   f.write(content)
