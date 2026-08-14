@@ -493,7 +493,115 @@ jobs:
           with open(path, "w") as f:
               f.write(content)
           EOF
+      - name: Create GpsNotif native plugin (lock-screen GPS display)
+        run: |
+          PKG_DIR="android/app/src/main/java/com/hery/smax155"
+          mkdir -p "$PKG_DIR"
+          cat > "$PKG_DIR/GpsNotifPlugin.java" <<'JAVAEOF'
+          package com.hery.smax155;
 
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.os.Build;
+          import android.util.Base64;
+          import androidx.core.app.NotificationCompat;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          @CapacitorPlugin(name = "GpsNotif")
+          public class GpsNotifPlugin extends Plugin {
+
+              private static final int LOCKSCREEN_NOTIFICATION_ID = 20260814;
+              private static final String LOCKSCREEN_CHANNEL_ID = "smax155_gps_lockscreen";
+              private static final String LOCKSCREEN_CHANNEL_NAME = "SMAX 155 — Affichage GPS écran verrouillé";
+
+              private Bitmap dataUrlToBitmap(String dataUrl) {
+                  if (dataUrl == null || dataUrl.isEmpty()) return null;
+                  try {
+                      int commaIdx = dataUrl.indexOf(",");
+                      if (commaIdx < 0) return null;
+                      String base64Part = dataUrl.substring(commaIdx + 1);
+                      byte[] bytes = Base64.decode(base64Part, Base64.DEFAULT);
+                      return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+
+              private void ensureLockScreenChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationManager manager =
+                          (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                      if (manager != null && manager.getNotificationChannel(LOCKSCREEN_CHANNEL_ID) == null) {
+                          NotificationChannel channel = new NotificationChannel(
+                              LOCKSCREEN_CHANNEL_ID,
+                              LOCKSCREEN_CHANNEL_NAME,
+                              NotificationManager.IMPORTANCE_LOW
+                          );
+                          channel.setDescription("Vitesse, altitude, cap GPS en direct sur écran verrouillé");
+                          channel.setShowBadge(false);
+                          manager.createNotificationChannel(channel);
+                      }
+                  }
+              }
+
+              @PluginMethod
+              public void updateLockScreenDisplay(PluginCall call) {
+                  String title = call.getString("title", "GPS actif");
+                  String text = call.getString("text", "");
+                  String iconDataUrl = call.getString("iconDataUrl", null);
+
+                  ensureLockScreenChannel();
+
+                  NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), LOCKSCREEN_CHANNEL_ID)
+                      .setSmallIcon(getContext().getApplicationInfo().icon)
+                      .setContentTitle(title)
+                      .setContentText(text)
+                      .setOngoing(true)
+                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                      .setPriority(NotificationCompat.PRIORITY_LOW)
+                      .setOnlyAlertOnce(true);
+
+                  Bitmap bitmap = dataUrlToBitmap(iconDataUrl);
+                  if (bitmap != null) {
+                      builder.setLargeIcon(bitmap);
+                      builder.setStyle(new NotificationCompat.BigPictureStyle().bigPicture(bitmap));
+                  }
+
+                  NotificationManager manager =
+                      (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                  if (manager != null) {
+                      manager.notify(LOCKSCREEN_NOTIFICATION_ID, builder.build());
+                  }
+
+                  call.resolve();
+              }
+
+              @PluginMethod
+              public void stopLockScreenDisplay(PluginCall call) {
+                  NotificationManager manager =
+                      (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                  if (manager != null) {
+                      manager.cancel(LOCKSCREEN_NOTIFICATION_ID);
+                  }
+                  call.resolve();
+              }
+
+              @PluginMethod
+              public void isAvailable(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  ret.put("available", true);
+                  call.resolve(ret);
+              }
+          }
+          JAVAEOF
+          echo "GpsNotifPlugin.java créé dans $PKG_DIR"
+          ls -la "$PKG_DIR"
       - name: Set status bar & navigation bar color
         run: |
           python3 - <<'EOF'
