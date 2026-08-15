@@ -514,6 +514,136 @@ jobs:
           with open(path, "w") as f:
               f.write(content)
           EOF
+      - name: Create fullscreen lock-screen GPS Activity + layout
+        run: |
+          PKG_DIR="android/app/src/main/java/com/hery/smax155"
+          LAYOUT_DIR="android/app/src/main/res/layout"
+          mkdir -p "$PKG_DIR" "$LAYOUT_DIR"
+
+          # ── Layout plein écran : une seule ImageView qui occupe tout
+          # l'écran (comme un fond d'écran de veille), plus un fond noir
+          # derrière pour éviter tout flash blanc pendant le chargement. ──
+          cat > "$LAYOUT_DIR/activity_lockscreen_gps.xml" <<'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#000000">
+
+              <ImageView
+                  android:id="@+id/lockscreenGpsImage"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent"
+                  android:scaleType="centerCrop"
+                  android:contentDescription="Affichage GPS écran verrouillé" />
+
+          </FrameLayout>
+          XMLEOF
+          echo "activity_lockscreen_gps.xml créé"
+
+          # ── Activity plein écran par-dessus le verrouillage. setShowWhenLocked
+          # + setTurnScreenOn (API 27+) sont l'équivalent moderne des anciens
+          # flags FLAG_SHOW_WHEN_LOCKED / FLAG_TURN_SCREEN_ON, recommandés par
+          # Google depuis Android 8.1 pour ce cas d'usage exact (apps
+          # d'affichage type navigation/GPS par-dessus le verrouillage). Repli
+          # sur les window flags pour les versions plus anciennes. ──
+          cat > "$PKG_DIR/LockScreenGpsActivity.java" <<'JAVAEOF'
+          package com.hery.smax155;
+
+          import android.app.Activity;
+          import android.app.KeyguardManager;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.util.Base64;
+          import android.view.WindowManager;
+          import android.widget.ImageView;
+
+          public class LockScreenGpsActivity extends Activity {
+
+              public static volatile LockScreenGpsActivity instance = null;
+
+              private ImageView imageView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  // ── Affichage par-dessus l'écran verrouillé + réveil de l'écran.
+                  // API 27+ : méthodes dédiées. En dessous : anciens window flags
+                  // (toujours fonctionnels, juste dépréciés). ──
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                      setShowWhenLocked(true);
+                      setTurnScreenOn(true);
+                      KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+                      if (km != null) {
+                          km.requestDismissKeyguard(this, null);
+                      }
+                  } else {
+                      getWindow().addFlags(
+                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                          | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                          | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                      );
+                  }
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  // ── Plein écran immersif : masque barre de statut/navigation pour
+                  // que les cadrans GPS occupent VRAIMENT tout l'écran, comme un
+                  // fond d'écran de veille. ──
+                  getWindow().getDecorView().setSystemUiVisibility(
+                      android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                      | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                      | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                      | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                      | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                      | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                  );
+
+                  setContentView(R.layout.activity_lockscreen_gps);
+                  imageView = findViewById(R.id.lockscreenGpsImage);
+                  instance = this;
+
+                  String iconDataUrl = getIntent().getStringExtra("iconDataUrl");
+                  applyImage(iconDataUrl);
+              }
+
+              @Override
+              protected void onNewIntent(android.content.Intent intent) {
+                  super.onNewIntent(intent);
+                  String iconDataUrl = intent.getStringExtra("iconDataUrl");
+                  applyImage(iconDataUrl);
+              }
+
+              // ── Appelée depuis GpsNotifPlugin à chaque mise à jour GPS pour
+              // rafraîchir l'image affichée sans relancer toute l'Activity. ──
+              public void applyImage(String dataUrl) {
+                  if (dataUrl == null || dataUrl.isEmpty() || imageView == null) return;
+                  try {
+                      int commaIdx = dataUrl.indexOf(",");
+                      if (commaIdx < 0) return;
+                      String base64Part = dataUrl.substring(commaIdx + 1);
+                      byte[] bytes = Base64.decode(base64Part, Base64.DEFAULT);
+                      Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                      if (bitmap != null) {
+                          imageView.setImageBitmap(bitmap);
+                      }
+                  } catch (Exception e) {
+                      // image corrompue ou décodage échoué : on garde l'image précédente
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  if (instance == this) instance = null;
+              }
+          }
+          JAVAEOF
+          echo "LockScreenGpsActivity.java créé dans $PKG_DIR"
+
       - name: Create GpsNotif native plugin (lock-screen GPS display)
         run: |
           PKG_DIR="android/app/src/main/java/com/hery/smax155"
@@ -626,6 +756,53 @@ jobs:
                   ret.put("available", true);
                   call.resolve(ret);
               }
+
+              // ── Plein écran verrouillé (vraie Activity, pas une notification) ──
+
+              @PluginMethod
+              public void showFullscreenLockDisplay(PluginCall call) {
+                  String iconDataUrl = call.getString("iconDataUrl", null);
+                  android.content.Intent intent = new android.content.Intent(getContext(), LockScreenGpsActivity.class);
+                  intent.putExtra("iconDataUrl", iconDataUrl);
+                  intent.setFlags(
+                      android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                      | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                      | android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                  );
+                  getContext().startActivity(intent);
+                  call.resolve();
+              }
+
+              @PluginMethod
+              public void updateFullscreenLockDisplay(PluginCall call) {
+                  String iconDataUrl = call.getString("iconDataUrl", null);
+                  // ── Si l'Activity est déjà à l'écran, on met juste à jour son
+                  // image (pas de relance, pas de clignotement). Sinon on la lance
+                  // (cas : écran verrouillé pendant que le trajet démarrait déjà). ──
+                  LockScreenGpsActivity activity = LockScreenGpsActivity.instance;
+                  if (activity != null) {
+                      activity.applyImage(iconDataUrl);
+                  } else {
+                      android.content.Intent intent = new android.content.Intent(getContext(), LockScreenGpsActivity.class);
+                      intent.putExtra("iconDataUrl", iconDataUrl);
+                      intent.setFlags(
+                          android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                          | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                          | android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                      );
+                      getContext().startActivity(intent);
+                  }
+                  call.resolve();
+              }
+
+              @PluginMethod
+              public void hideFullscreenLockDisplay(PluginCall call) {
+                  LockScreenGpsActivity activity = LockScreenGpsActivity.instance;
+                  if (activity != null) {
+                      activity.finish();
+                  }
+                  call.resolve();
+              }
           }
           JAVAEOF
           echo "GpsNotifPlugin.java créé dans $PKG_DIR"
@@ -682,6 +859,41 @@ jobs:
               with open(path, "w") as f:
                   f.write(content)
               print("MainActivity.java : GpsNotifPlugin enregistré dans", path)
+          EOF
+
+      - name: Declare LockScreenGpsActivity in AndroidManifest
+        run: |
+          python3 - <<'EOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path) as f:
+              content = f.read()
+
+          # ── Activity dédiée au plein écran GPS par-dessus le verrouillage.
+          # showOnLockScreen/turnScreenOn (attributs manifest, API 27+) sont
+          # redondants avec les appels Java équivalents dans onCreate() mais
+          # les deux sont recommandés ensemble par la doc Android pour une
+          # compatibilité maximale entre versions/fabricants. excludeFromRecents
+          # évite qu'elle pollue l'écran multitâche comme une appli à part. ──
+          activity_decl = (
+              '\n        <activity'
+              '\n            android:name="com.hery.smax155.LockScreenGpsActivity"'
+              '\n            android:exported="false"'
+              '\n            android:showOnLockScreen="true"'
+              '\n            android:turnScreenOn="true"'
+              '\n            android:excludeFromRecents="true"'
+              '\n            android:launchMode="singleTask"'
+              '\n            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"'
+              '\n            android:configChanges="orientation|screenSize|keyboardHidden" />'
+          )
+
+          if 'LockScreenGpsActivity' not in content:
+              content = re.sub(r'(</application>)', activity_decl + r'\n    \1', content, count=1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("AndroidManifest.xml : LockScreenGpsActivity déclarée")
+          else:
+              print("LockScreenGpsActivity déjà déclarée, rien à faire")
           EOF
 
       - name: Set status bar & navigation bar color
