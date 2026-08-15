@@ -72,7 +72,8 @@ jobs:
                       "import android.Manifest;\n"
                       "import android.content.pm.PackageManager;\n"
                       "import androidx.core.app.ActivityCompat;\n"
-                      "import androidx.core.content.ContextCompat;"
+                      "import androidx.core.content.ContextCompat;\n"
+                      "import android.os.Build;"
                   )
 
               if "filePathCallback" not in content:
@@ -120,10 +121,21 @@ jobs:
                   "        // appuie réellement sur le bouton micro/caméra dans l'app — c'est le\n"
                   "        // seul moment où le contexte justifie le popup et où Android autorise\n"
                   "        // encore un nouveau prompt.\n"
-                  "        String[] neededPerms = new String[] {\n"
+                  "        //\n"
+                  "        // POST_NOTIFICATIONS (Android 13+ / API 33+) est déclarée dans le\n"
+                  "        // manifeste mais c'est une permission runtime \"dangerous\" comme les\n"
+                  "        // autres : sans cette demande explicite, NotificationManager.notify()\n"
+                  "        // échoue SILENCIEUSEMENT (aucune exception) sur Android 13+ — c'était\n"
+                  "        // la cause du bug \"aucune notification GPS n'apparaît nulle part\",\n"
+                  "        // même dans le tiroir de notifications standard écran déverrouillé.\n"
+                  "        java.util.List<String> neededPermsList = new java.util.ArrayList<>(java.util.Arrays.asList(\n"
                   "            Manifest.permission.ACCESS_FINE_LOCATION,\n"
                   "            Manifest.permission.ACCESS_COARSE_LOCATION\n"
-                  "        };\n"
+                  "        ));\n"
+                  "        if (Build.VERSION.SDK_INT >= 33) {\n"
+                  "            neededPermsList.add(Manifest.permission.POST_NOTIFICATIONS);\n"
+                  "        }\n"
+                  "        String[] neededPerms = neededPermsList.toArray(new String[0]);\n"
                   "        java.util.List<String> toRequest = new java.util.ArrayList<>();\n"
                   "        for (String p : neededPerms) {\n"
                   "            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {\n"
@@ -554,6 +566,13 @@ jobs:
                           );
                           channel.setDescription("Vitesse, altitude, cap GPS en direct sur écran verrouillé");
                           channel.setShowBadge(false);
+                          // IMPORTANT : sur Android 8+ (API 26+), c'est la visibilité DU CANAL
+                          // qui prime sur celle du Builder si le canal est plus restrictif —
+                          // certains constructeurs (Samsung notamment) créent les canaux avec
+                          // une visibilité par défaut qui masque le contenu écran verrouillé.
+                          // On force explicitement VISIBILITY_PUBLIC ici pour ne pas dépendre
+                          // du comportement par défaut du fabricant.
+                          channel.setLockscreenVisibility(NotificationCompat.VISIBILITY_PUBLIC);
                           manager.createNotificationChannel(channel);
                       }
                   }
