@@ -537,6 +537,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
               <uses-feature android:name="android.hardware.camera" android:required="false" />
               <uses-feature android:name="android.hardware.location.gps" android:required="false" />
@@ -988,6 +989,213 @@ jobs:
           echo "GpsNotifPlugin.java créé dans $PKG_DIR"
           ls -la "$PKG_DIR"
 
+      - name: Create GoPro native plugin (HERO8 Wi-Fi REST control)
+        # ── La HERO8 Black, une fois son propre Wi-Fi activé et le téléphone
+        # connecté à ce réseau (manuellement, dans les réglages Wi-Fi Android
+        # — aucun appairage BLE n'est fait ici, volontairement, pour rester
+        # simple et fiable depuis un flux de travail sans debug USB), expose
+        # une API REST HTTP locale sur 10.5.5.9:8080 (Open GoPro API v1,
+        # HERO8 = ancienne génération "gpControl"). Ce plugin ne fait QUE
+        # des requêtes HTTP vers cette IP fixe : pas de BLE, pas de scan,
+        # pas de pairing — donc pas de logique complexe à déboguer sans
+        # accès physique au téléphone. Si le téléphone n'est pas connecté au
+        # Wi-Fi de la GoPro, chaque requête échoue simplement avec un
+        # timeout, remonté proprement au JS comme "non connecté". ──
+        run: |
+          PKG_DIR="android/app/src/main/java/com/hery/smax155"
+          mkdir -p "$PKG_DIR"
+          cat > "$PKG_DIR/GoProPlugin.java" <<'JAVAEOF'
+          package com.hery.smax155;
+
+          import android.content.Context;
+          import android.net.wifi.WifiManager;
+          import android.net.wifi.WifiInfo;
+          import android.util.Log;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          // ── Contrôle HERO8 Black via son API REST locale (gpControl), UNIQUEMENT
+          // en HTTP sur le Wi-Fi de la caméra. Aucun BLE, aucun appairage natif :
+          // l'utilisateur active le Wi-Fi de la GoPro sur la caméra elle-même puis
+          // se connecte à ce réseau depuis les réglages Wi-Fi Android, comme pour
+          // n'importe quel point d'accès. Ce plugin détecte ensuite s'il peut
+          // effectivement joindre la caméra à son IP fixe et pilote REC/status.
+          //
+          // IMPORTANT : ne jamais prétendre "connecté" tant qu'un appel HTTP réel
+          // n'a pas réussi — même logique honnête que le reste du projet (voir
+          // SmaxGoPro côté JS). ──
+          @CapacitorPlugin(name = "GoPro")
+          public class GoProPlugin extends Plugin {
+
+              private static final String TAG = "SMAX155-GoProPlugin";
+              // Adresse fixe de la caméra une fois connectée à son propre Wi-Fi AP —
+              // constante côté GoPro (HERO8/gpControl), ne dépend pas du téléphone.
+              private static final String GOPRO_IP = "10.5.5.9";
+              private static final int GOPRO_PORT = 8080;
+              private static final int TIMEOUT_MS = 2500;
+
+              private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
+              @PluginMethod
+              public void isAvailable(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  ret.put("available", true);
+                  call.resolve(ret);
+              }
+
+              // ── Renvoie le SSID Wi-Fi actuel du téléphone, pour que le JS puisse
+              // afficher "connecte-toi au Wi-Fi de ta GoPro" si ce n'est pas le cas.
+              // Ne garantit PAS que la caméra répond (voir checkConnection). ──
+              @PluginMethod
+              public void getCurrentWifiSsid(PluginCall call) {
+                  try {
+                      WifiManager wifiManager =
+                          (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                      String ssid = null;
+                      if (wifiManager != null) {
+                          WifiInfo info = wifiManager.getConnectionInfo();
+                          if (info != null) {
+                              ssid = info.getSSID();
+                              // Android entoure le SSID de guillemets doubles littéraux
+                              // ("MonReseau") sauf cas d'erreur (<unknown ssid>) — on
+                              // nettoie pour que le JS reçoive une chaîne propre.
+                              if (ssid != null && ssid.startsWith("\"") && ssid.endsWith("\"") && ssid.length() >= 2) {
+                                  ssid = ssid.substring(1, ssid.length() - 1);
+                              }
+                          }
+                      }
+                      JSObject ret = new JSObject();
+                      ret.put("ssid", ssid);
+                      call.resolve(ret);
+                  } catch (Exception e) {
+                      Log.e(TAG, "getCurrentWifiSsid a échoué", e);
+                      call.reject("getCurrentWifiSsid a échoué : " + e.getMessage());
+                  }
+              }
+
+              // ── Requête HTTP GET générique vers la GoPro, exécutée hors du thread
+              // UI (obligatoire sur Android : toute I/O réseau sur le thread principal
+              // lève une NetworkOnMainThreadException, fatale). ──
+              private String httpGet(String path) throws Exception {
+                  URL url = new URL("http://" + GOPRO_IP + ":" + GOPRO_PORT + path);
+                  HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                  conn.setConnectTimeout(TIMEOUT_MS);
+                  conn.setReadTimeout(TIMEOUT_MS);
+                  conn.setRequestMethod("GET");
+                  try {
+                      int code = conn.getResponseCode();
+                      StringBuilder sb = new StringBuilder();
+                      BufferedReader reader = new BufferedReader(
+                          new InputStreamReader(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream())
+                      );
+                      String line;
+                      while ((line = reader.readLine()) != null) sb.append(line);
+                      reader.close();
+                      if (code < 200 || code >= 300) {
+                          throw new Exception("HTTP " + code + " depuis la GoPro : " + sb);
+                      }
+                      return sb.toString();
+                  } finally {
+                      conn.disconnect();
+                  }
+              }
+
+              // ── connect() ne fait PAS de vraie "connexion" persistante (l'API
+              // gpControl est sans état, chaque requête HTTP est indépendante) : on
+              // vérifie juste qu'on peut effectivement joindre la caméra maintenant,
+              // via /gp/gpControl/status qui existe sur toutes les HERO8. Si ça
+              // répond, on considère "connecté" ; sinon on rejette honnêtement. ──
+              @PluginMethod
+              public void connect(PluginCall call) {
+                  executor.execute(() -> {
+                      try {
+                          String status = httpGet("/gp/gpControl/status");
+                          JSObject ret = new JSObject();
+                          ret.put("connected", true);
+                          ret.put("raw", status);
+                          call.resolve(ret);
+                      } catch (Exception e) {
+                          Log.w(TAG, "connect(): caméra injoignable — " + e.getMessage());
+                          call.reject("GoPro injoignable sur " + GOPRO_IP + " : " + e.getMessage() +
+                              " — vérifie que le téléphone est bien connecté au Wi-Fi de la GoPro.");
+                      }
+                  });
+              }
+
+              @PluginMethod
+              public void disconnect(PluginCall call) {
+                  // Rien à démonter côté réseau (pas de connexion persistante,
+                  // pas de socket ouvert) — on répond simplement OK.
+                  call.resolve();
+              }
+
+              @PluginMethod
+              public void startRecording(PluginCall call) {
+                  executor.execute(() -> {
+                      try {
+                          // Commande gpControl HERO8 pour démarrer l'enregistrement vidéo.
+                          httpGet("/gp/gpControl/command/shutter?p=1");
+                          call.resolve();
+                      } catch (Exception e) {
+                          Log.w(TAG, "startRecording() a échoué — " + e.getMessage());
+                          call.reject("Démarrage REC GoPro échoué : " + e.getMessage());
+                      }
+                  });
+              }
+
+              @PluginMethod
+              public void stopRecording(PluginCall call) {
+                  executor.execute(() -> {
+                      try {
+                          httpGet("/gp/gpControl/command/shutter?p=0");
+                          JSObject ret = new JSObject();
+                          ret.put("stopped", true);
+                          call.resolve(ret);
+                      } catch (Exception e) {
+                          Log.w(TAG, "stopRecording() a échoué — " + e.getMessage());
+                          // On ne bloque pas l'utilisateur si la GoPro a été débranchée
+                          // en cours de route : on répond quand même, sans planter le
+                          // flux STOP côté app (le GPS/chrono doivent s'arrêter dans
+                          // tous les cas côté JS).
+                          JSObject ret = new JSObject();
+                          ret.put("stopped", false);
+                          ret.put("error", e.getMessage());
+                          call.resolve(ret);
+                      }
+                  });
+              }
+
+              @PluginMethod
+              public void getStatus(PluginCall call) {
+                  executor.execute(() -> {
+                      try {
+                          String status = httpGet("/gp/gpControl/status");
+                          JSObject ret = new JSObject();
+                          ret.put("reachable", true);
+                          ret.put("raw", status);
+                          call.resolve(ret);
+                      } catch (Exception e) {
+                          JSObject ret = new JSObject();
+                          ret.put("reachable", false);
+                          ret.put("error", e.getMessage());
+                          call.resolve(ret);
+                      }
+                  });
+              }
+          }
+          JAVAEOF
+          echo "GoProPlugin.java créé dans $PKG_DIR"
+
       - name: Register GpsNotif plugin in MainActivity
         run: |
           python3 - <<'EOF'
@@ -1039,6 +1247,53 @@ jobs:
               with open(path, "w") as f:
                   f.write(content)
               print("MainActivity.java : GpsNotifPlugin enregistré dans", path)
+          EOF
+
+      - name: Register GoPro plugin in MainActivity
+        run: |
+          python3 - <<'EOF'
+          import re, glob
+          matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
+          if not matches:
+              print("WARNING: MainActivity.java not found, skipping GoPro registration")
+          else:
+              path = matches[0]
+              with open(path) as f:
+                  content = f.read()
+
+              # Même mécanisme que GpsNotifPlugin : registerPlugin() doit être
+              # appelé avant super.onCreate(), sinon
+              # window.Capacitor.Plugins.GoPro reste undefined côté JS.
+              if "import com.hery.smax155.GoProPlugin;" not in content:
+                  content = content.replace(
+                      "import com.getcapacitor.BridgeActivity;",
+                      "import com.getcapacitor.BridgeActivity;\n"
+                      "import com.hery.smax155.GoProPlugin;"
+                  )
+
+              if "registerPlugin(GoProPlugin.class);" not in content:
+                  if "super.onCreate(savedInstanceState);" in content:
+                      content = content.replace(
+                          "super.onCreate(savedInstanceState);",
+                          "registerPlugin(GoProPlugin.class);\n        super.onCreate(savedInstanceState);",
+                          1
+                      )
+                  else:
+                      content = re.sub(
+                          r"(public class MainActivity extends BridgeActivity \{)",
+                          r"\1\n"
+                          r"    @Override\n"
+                          r"    protected void onCreate(android.os.Bundle savedInstanceState) {\n"
+                          r"        registerPlugin(GoProPlugin.class);\n"
+                          r"        super.onCreate(savedInstanceState);\n"
+                          r"    }\n",
+                          content,
+                          count=1
+                      )
+
+              with open(path, "w") as f:
+                  f.write(content)
+              print("MainActivity.java : GoProPlugin enregistré dans", path)
           EOF
 
       - name: Declare LockScreenGpsActivity in AndroidManifest
