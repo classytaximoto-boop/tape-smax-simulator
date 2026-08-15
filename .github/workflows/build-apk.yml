@@ -546,21 +546,42 @@ jobs:
           # flags FLAG_SHOW_WHEN_LOCKED / FLAG_TURN_SCREEN_ON, recommandés par
           # Google depuis Android 8.1 pour ce cas d'usage exact (apps
           # d'affichage type navigation/GPS par-dessus le verrouillage). Repli
-          # sur les window flags pour les versions plus anciennes. ──
+          # sur les window flags pour les versions plus anciennes.
+          #
+          # CORRECTIFS CRASH (build précédent plantait à l'activation du
+          # toggle "GPS écran verrouillé") :
+          #   1) setShowWhenLocked/setTurnScreenOn/requestDismissKeyguard
+          #      peuvent lever une exception non catchée sur certains OEM
+          #      (Xiaomi/MIUI, Oppo/ColorOS) — elle remontait et tuait tout
+          #      le process. Entouré de try/catch, plus aucune fonction
+          #      n'est fatale si le système la refuse.
+          #   2) getIntent()/onNewIntent() peuvent recevoir un Intent sans
+          #      l'extra "iconDataUrl" (ou carrément un Intent null dans de
+          #      rares cas de relance système) — accès protégé.
+          #   3) applyImage() décodait un Bitmap sur le thread courant : si
+          #      appelée hors UI thread (ce qui arrive via GpsNotifPlugin,
+          #      voir plus bas), toute modification de l'ImageView doit
+          #      repasser par runOnUiThread pour éviter un
+          #      CalledFromWrongThreadException, qui est fatal et plante
+          #      immédiatement l'app. ──
           cat > "$PKG_DIR/LockScreenGpsActivity.java" <<'JAVAEOF'
           package com.hery.smax155;
 
           import android.app.Activity;
           import android.app.KeyguardManager;
+          import android.content.Intent;
           import android.graphics.Bitmap;
           import android.graphics.BitmapFactory;
           import android.os.Build;
           import android.os.Bundle;
           import android.util.Base64;
+          import android.util.Log;
           import android.view.WindowManager;
           import android.widget.ImageView;
 
           public class LockScreenGpsActivity extends Activity {
+
+              private static final String TAG = "SMAX155-LockScreen";
 
               public static volatile LockScreenGpsActivity instance = null;
 
@@ -571,68 +592,139 @@ jobs:
                   super.onCreate(savedInstanceState);
 
                   // ── Affichage par-dessus l'écran verrouillé + réveil de l'écran.
-                  // API 27+ : méthodes dédiées. En dessous : anciens window flags
-                  // (toujours fonctionnels, juste dépréciés). ──
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                      setShowWhenLocked(true);
-                      setTurnScreenOn(true);
-                      KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-                      if (km != null) {
-                          km.requestDismissKeyguard(this, null);
+                  // Chaque appel est isolé dans son propre try/catch : si l'un
+                  // échoue (refusé par l'OEM, keyguard non dismissible, etc.),
+                  // les autres s'exécutent quand même et l'Activity continue de
+                  // se construire au lieu de crasher tout le process. ──
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                          setShowWhenLocked(true);
+                      } else {
+                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
                       }
-                  } else {
-                      getWindow().addFlags(
-                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                          | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                          | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-                      );
+                  } catch (Exception e) {
+                      Log.e(TAG, "setShowWhenLocked a échoué, on continue quand même", e);
                   }
-                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                          setTurnScreenOn(true);
+                      } else {
+                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+                      }
+                  } catch (Exception e) {
+                      Log.e(TAG, "setTurnScreenOn a échoué, on continue quand même", e);
+                  }
+
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                          KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+                          if (km != null) {
+                              // IMPORTANT : sur certains constructeurs (Xiaomi/MIUI en
+                              // tête), requestDismissKeyguard() peut lever une
+                              // IllegalStateException ou une SecurityException selon
+                              // les réglages de confidentialité renforcée de l'OEM.
+                              // Sans ce try/catch, cette exception n'était PAS
+                              // interceptée et faisait planter tout le process —
+                              // c'était la cause principale du crash à l'activation
+                              // du toggle.
+                              km.requestDismissKeyguard(this, null);
+                          }
+                      } else {
+                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+                      }
+                  } catch (Exception e) {
+                      Log.e(TAG, "requestDismissKeyguard a échoué, on continue quand même", e);
+                  }
+
+                  try {
+                      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  } catch (Exception e) {
+                      Log.e(TAG, "FLAG_KEEP_SCREEN_ON a échoué", e);
+                  }
 
                   // ── Plein écran immersif : masque barre de statut/navigation pour
                   // que les cadrans GPS occupent VRAIMENT tout l'écran, comme un
                   // fond d'écran de veille. ──
-                  getWindow().getDecorView().setSystemUiVisibility(
-                      android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                      | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                      | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                      | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                      | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
-                      | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                  );
+                  try {
+                      getWindow().getDecorView().setSystemUiVisibility(
+                          android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                      );
+                  } catch (Exception e) {
+                      Log.e(TAG, "Passage en plein écran immersif échoué", e);
+                  }
 
-                  setContentView(R.layout.activity_lockscreen_gps);
-                  imageView = findViewById(R.id.lockscreenGpsImage);
+                  try {
+                      setContentView(R.layout.activity_lockscreen_gps);
+                      imageView = findViewById(R.id.lockscreenGpsImage);
+                  } catch (Exception e) {
+                      // Si même le layout plante (ressource manquante après un
+                      // build incomplet, par exemple), on ferme proprement plutôt
+                      // que de laisser l'Activity dans un état invalide.
+                      Log.e(TAG, "setContentView a échoué, fermeture de l'Activity", e);
+                      finish();
+                      return;
+                  }
+
                   instance = this;
 
-                  String iconDataUrl = getIntent().getStringExtra("iconDataUrl");
+                  String iconDataUrl = null;
+                  try {
+                      Intent i = getIntent();
+                      if (i != null) {
+                          iconDataUrl = i.getStringExtra("iconDataUrl");
+                      }
+                  } catch (Exception e) {
+                      Log.e(TAG, "Lecture de l'extra iconDataUrl échouée", e);
+                  }
                   applyImage(iconDataUrl);
               }
 
               @Override
-              protected void onNewIntent(android.content.Intent intent) {
+              protected void onNewIntent(Intent intent) {
                   super.onNewIntent(intent);
-                  String iconDataUrl = intent.getStringExtra("iconDataUrl");
-                  applyImage(iconDataUrl);
+                  try {
+                      String iconDataUrl = (intent != null) ? intent.getStringExtra("iconDataUrl") : null;
+                      applyImage(iconDataUrl);
+                  } catch (Exception e) {
+                      Log.e(TAG, "onNewIntent a échoué", e);
+                  }
               }
 
               // ── Appelée depuis GpsNotifPlugin à chaque mise à jour GPS pour
-              // rafraîchir l'image affichée sans relancer toute l'Activity. ──
-              public void applyImage(String dataUrl) {
-                  if (dataUrl == null || dataUrl.isEmpty() || imageView == null) return;
-                  try {
-                      int commaIdx = dataUrl.indexOf(",");
-                      if (commaIdx < 0) return;
-                      String base64Part = dataUrl.substring(commaIdx + 1);
-                      byte[] bytes = Base64.decode(base64Part, Base64.DEFAULT);
-                      Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                      if (bitmap != null) {
-                          imageView.setImageBitmap(bitmap);
+              // rafraîchir l'image affichée sans relancer toute l'Activity.
+              // NE PAS supposer qu'on est sur le UI thread : GpsNotifPlugin
+              // appelle ceci depuis le contexte du plugin Capacitor (thread
+              // bridge), pas forcément le thread UI. Toute modification de vue
+              // (imageView.setImageBitmap) DOIT passer par runOnUiThread, sous
+              // peine de CalledFromWrongThreadException — fatale, elle plante
+              // immédiatement l'app. C'était la deuxième cause probable du
+              // crash observé lors des mises à jour répétées (toutes les 2s)
+              // pendant que le GPS tourne écran verrouillé. ──
+              public void applyImage(final String dataUrl) {
+                  if (dataUrl == null || dataUrl.isEmpty()) return;
+                  runOnUiThread(() -> {
+                      if (imageView == null) return;
+                      try {
+                          int commaIdx = dataUrl.indexOf(",");
+                          if (commaIdx < 0) return;
+                          String base64Part = dataUrl.substring(commaIdx + 1);
+                          byte[] bytes = Base64.decode(base64Part, Base64.DEFAULT);
+                          Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                          if (bitmap != null) {
+                              imageView.setImageBitmap(bitmap);
+                          }
+                      } catch (Exception e) {
+                          // image corrompue ou décodage échoué : on garde l'image
+                          // précédente plutôt que de planter.
+                          Log.e(TAG, "applyImage: décodage bitmap échoué", e);
                       }
-                  } catch (Exception e) {
-                      // image corrompue ou décodage échoué : on garde l'image précédente
-                  }
+                  });
               }
 
               @Override
@@ -657,6 +749,7 @@ jobs:
           import android.graphics.BitmapFactory;
           import android.os.Build;
           import android.util.Base64;
+          import android.util.Log;
           import androidx.core.app.NotificationCompat;
           import com.getcapacitor.JSObject;
           import com.getcapacitor.Plugin;
@@ -667,10 +760,24 @@ jobs:
           @CapacitorPlugin(name = "GpsNotif")
           public class GpsNotifPlugin extends Plugin {
 
+              private static final String TAG = "SMAX155-GpsNotifPlugin";
               private static final int LOCKSCREEN_NOTIFICATION_ID = 20260814;
               private static final String LOCKSCREEN_CHANNEL_ID = "smax155_gps_lockscreen";
               private static final String LOCKSCREEN_CHANNEL_NAME = "SMAX 155 — Affichage GPS écran verrouillé";
 
+              // ── CORRECTIF CRASH : garde anti-relance. showFullscreenLockDisplay
+              // lance l'Activity via startActivity() depuis un Context
+              // application (pas une vraie Activity), avec
+              // FLAG_ACTIVITY_REORDER_TO_FRONT. Si cette méthode est appelée
+              // plusieurs fois rapprochées (ce qui arrivait : elle est
+              // déclenchée à chaque fois que NativeGpsNotif.start() est relancé,
+              // par ex. au retry automatique 1s/2s si les plugins ne sont pas
+              // encore prêts) SANS que l'Activity précédente ne soit détruite,
+              // chaque appel recréait une tâche/instance concurrente — source
+              // de crash aléatoire (double résolution de fenêtre au-dessus du
+              // keyguard). On ne relance donc plus l'Activity si elle est déjà
+              // affichée : on se contente de la mettre à jour, exactement comme
+              // le fait déjà updateFullscreenLockDisplay. ──
               private Bitmap dataUrlToBitmap(String dataUrl) {
                   if (dataUrl == null || dataUrl.isEmpty()) return null;
                   try {
@@ -680,74 +787,89 @@ jobs:
                       byte[] bytes = Base64.decode(base64Part, Base64.DEFAULT);
                       return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
                   } catch (Exception e) {
+                      Log.e(TAG, "dataUrlToBitmap a échoué", e);
                       return null;
                   }
               }
 
               private void ensureLockScreenChannel() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationManager manager =
-                          (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
-                      if (manager != null && manager.getNotificationChannel(LOCKSCREEN_CHANNEL_ID) == null) {
-                          NotificationChannel channel = new NotificationChannel(
-                              LOCKSCREEN_CHANNEL_ID,
-                              LOCKSCREEN_CHANNEL_NAME,
-                              NotificationManager.IMPORTANCE_LOW
-                          );
-                          channel.setDescription("Vitesse, altitude, cap GPS en direct sur écran verrouillé");
-                          channel.setShowBadge(false);
-                          // IMPORTANT : sur Android 8+ (API 26+), c'est la visibilité DU CANAL
-                          // qui prime sur celle du Builder si le canal est plus restrictif —
-                          // certains constructeurs (Samsung notamment) créent les canaux avec
-                          // une visibilité par défaut qui masque le contenu écran verrouillé.
-                          // On force explicitement VISIBILITY_PUBLIC ici pour ne pas dépendre
-                          // du comportement par défaut du fabricant.
-                          channel.setLockscreenVisibility(NotificationCompat.VISIBILITY_PUBLIC);
-                          manager.createNotificationChannel(channel);
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          NotificationManager manager =
+                              (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                          if (manager != null && manager.getNotificationChannel(LOCKSCREEN_CHANNEL_ID) == null) {
+                              NotificationChannel channel = new NotificationChannel(
+                                  LOCKSCREEN_CHANNEL_ID,
+                                  LOCKSCREEN_CHANNEL_NAME,
+                                  NotificationManager.IMPORTANCE_LOW
+                              );
+                              channel.setDescription("Vitesse, altitude, cap GPS en direct sur écran verrouillé");
+                              channel.setShowBadge(false);
+                              // IMPORTANT : sur Android 8+ (API 26+), c'est la visibilité DU CANAL
+                              // qui prime sur celle du Builder si le canal est plus restrictif —
+                              // certains constructeurs (Samsung notamment) créent les canaux avec
+                              // une visibilité par défaut qui masque le contenu écran verrouillé.
+                              // On force explicitement VISIBILITY_PUBLIC ici pour ne pas dépendre
+                              // du comportement par défaut du fabricant.
+                              channel.setLockscreenVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+                              manager.createNotificationChannel(channel);
+                          }
                       }
+                  } catch (Exception e) {
+                      Log.e(TAG, "ensureLockScreenChannel a échoué", e);
                   }
               }
 
               @PluginMethod
               public void updateLockScreenDisplay(PluginCall call) {
-                  String title = call.getString("title", "GPS actif");
-                  String text = call.getString("text", "");
-                  String iconDataUrl = call.getString("iconDataUrl", null);
+                  try {
+                      String title = call.getString("title", "GPS actif");
+                      String text = call.getString("text", "");
+                      String iconDataUrl = call.getString("iconDataUrl", null);
 
-                  ensureLockScreenChannel();
+                      ensureLockScreenChannel();
 
-                  NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), LOCKSCREEN_CHANNEL_ID)
-                      .setSmallIcon(getContext().getApplicationInfo().icon)
-                      .setContentTitle(title)
-                      .setContentText(text)
-                      .setOngoing(true)
-                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                      .setPriority(NotificationCompat.PRIORITY_LOW)
-                      .setOnlyAlertOnce(true);
+                      NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), LOCKSCREEN_CHANNEL_ID)
+                          .setSmallIcon(getContext().getApplicationInfo().icon)
+                          .setContentTitle(title)
+                          .setContentText(text)
+                          .setOngoing(true)
+                          .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                          .setPriority(NotificationCompat.PRIORITY_LOW)
+                          .setOnlyAlertOnce(true);
 
-                  Bitmap bitmap = dataUrlToBitmap(iconDataUrl);
-                  if (bitmap != null) {
-                      builder.setLargeIcon(bitmap);
-                      builder.setStyle(new NotificationCompat.BigPictureStyle().bigPicture(bitmap));
+                      Bitmap bitmap = dataUrlToBitmap(iconDataUrl);
+                      if (bitmap != null) {
+                          builder.setLargeIcon(bitmap);
+                          builder.setStyle(new NotificationCompat.BigPictureStyle().bigPicture(bitmap));
+                      }
+
+                      NotificationManager manager =
+                          (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                      if (manager != null) {
+                          manager.notify(LOCKSCREEN_NOTIFICATION_ID, builder.build());
+                      }
+
+                      call.resolve();
+                  } catch (Exception e) {
+                      Log.e(TAG, "updateLockScreenDisplay a échoué", e);
+                      call.reject("updateLockScreenDisplay a échoué : " + e.getMessage());
                   }
-
-                  NotificationManager manager =
-                      (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
-                  if (manager != null) {
-                      manager.notify(LOCKSCREEN_NOTIFICATION_ID, builder.build());
-                  }
-
-                  call.resolve();
               }
 
               @PluginMethod
               public void stopLockScreenDisplay(PluginCall call) {
-                  NotificationManager manager =
-                      (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
-                  if (manager != null) {
-                      manager.cancel(LOCKSCREEN_NOTIFICATION_ID);
+                  try {
+                      NotificationManager manager =
+                          (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                      if (manager != null) {
+                          manager.cancel(LOCKSCREEN_NOTIFICATION_ID);
+                      }
+                      call.resolve();
+                  } catch (Exception e) {
+                      Log.e(TAG, "stopLockScreenDisplay a échoué", e);
+                      call.reject("stopLockScreenDisplay a échoué : " + e.getMessage());
                   }
-                  call.resolve();
               }
 
               @PluginMethod
@@ -761,47 +883,74 @@ jobs:
 
               @PluginMethod
               public void showFullscreenLockDisplay(PluginCall call) {
-                  String iconDataUrl = call.getString("iconDataUrl", null);
-                  android.content.Intent intent = new android.content.Intent(getContext(), LockScreenGpsActivity.class);
-                  intent.putExtra("iconDataUrl", iconDataUrl);
-                  intent.setFlags(
-                      android.content.Intent.FLAG_ACTIVITY_NEW_TASK
-                      | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                      | android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                  );
-                  getContext().startActivity(intent);
-                  call.resolve();
-              }
+                  try {
+                      String iconDataUrl = call.getString("iconDataUrl", null);
 
-              @PluginMethod
-              public void updateFullscreenLockDisplay(PluginCall call) {
-                  String iconDataUrl = call.getString("iconDataUrl", null);
-                  // ── Si l'Activity est déjà à l'écran, on met juste à jour son
-                  // image (pas de relance, pas de clignotement). Sinon on la lance
-                  // (cas : écran verrouillé pendant que le trajet démarrait déjà). ──
-                  LockScreenGpsActivity activity = LockScreenGpsActivity.instance;
-                  if (activity != null) {
-                      activity.applyImage(iconDataUrl);
-                  } else {
+                      // ── CORRECTIF CRASH : si l'Activity est déjà affichée (cas du
+                      // retry automatique de NativeGpsNotif.start(), ou d'un
+                      // double-appel rapproché), on se contente de rafraîchir
+                      // l'image existante au lieu de relancer un startActivity()
+                      // concurrent — c'était la cause la plus probable des crashs
+                      // aléatoires observés. ──
+                      LockScreenGpsActivity existing = LockScreenGpsActivity.instance;
+                      if (existing != null) {
+                          existing.applyImage(iconDataUrl);
+                          call.resolve();
+                          return;
+                      }
+
                       android.content.Intent intent = new android.content.Intent(getContext(), LockScreenGpsActivity.class);
                       intent.putExtra("iconDataUrl", iconDataUrl);
                       intent.setFlags(
                           android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                           | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                          | android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                       );
                       getContext().startActivity(intent);
+                      call.resolve();
+                  } catch (Exception e) {
+                      Log.e(TAG, "showFullscreenLockDisplay a échoué", e);
+                      call.reject("showFullscreenLockDisplay a échoué : " + e.getMessage());
                   }
-                  call.resolve();
+              }
+
+              @PluginMethod
+              public void updateFullscreenLockDisplay(PluginCall call) {
+                  try {
+                      String iconDataUrl = call.getString("iconDataUrl", null);
+                      // ── Si l'Activity est déjà à l'écran, on met juste à jour son
+                      // image (pas de relance, pas de clignotement). Sinon on la lance
+                      // (cas : écran verrouillé pendant que le trajet démarrait déjà). ──
+                      LockScreenGpsActivity activity = LockScreenGpsActivity.instance;
+                      if (activity != null) {
+                          activity.applyImage(iconDataUrl);
+                      } else {
+                          android.content.Intent intent = new android.content.Intent(getContext(), LockScreenGpsActivity.class);
+                          intent.putExtra("iconDataUrl", iconDataUrl);
+                          intent.setFlags(
+                              android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                              | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                          );
+                          getContext().startActivity(intent);
+                      }
+                      call.resolve();
+                  } catch (Exception e) {
+                      Log.e(TAG, "updateFullscreenLockDisplay a échoué", e);
+                      call.reject("updateFullscreenLockDisplay a échoué : " + e.getMessage());
+                  }
               }
 
               @PluginMethod
               public void hideFullscreenLockDisplay(PluginCall call) {
-                  LockScreenGpsActivity activity = LockScreenGpsActivity.instance;
-                  if (activity != null) {
-                      activity.finish();
+                  try {
+                      LockScreenGpsActivity activity = LockScreenGpsActivity.instance;
+                      if (activity != null) {
+                          activity.finish();
+                      }
+                      call.resolve();
+                  } catch (Exception e) {
+                      Log.e(TAG, "hideFullscreenLockDisplay a échoué", e);
+                      call.reject("hideFullscreenLockDisplay a échoué : " + e.getMessage());
                   }
-                  call.resolve();
               }
           }
           JAVAEOF
@@ -874,7 +1023,17 @@ jobs:
           # redondants avec les appels Java équivalents dans onCreate() mais
           # les deux sont recommandés ensemble par la doc Android pour une
           # compatibilité maximale entre versions/fabricants. excludeFromRecents
-          # évite qu'elle pollue l'écran multitâche comme une appli à part. ──
+          # évite qu'elle pollue l'écran multitâche comme une appli à part.
+          #
+          # CORRECTIF : android:launchMode="singleTask" combiné à
+          # FLAG_ACTIVITY_NEW_TASK déclenché depuis un Context non-Activity
+          # (voir GpsNotifPlugin) pouvait créer une tâche racine séparée mal
+          # réconciliée avec la tâche principale de l'app sur certains
+          # firmwares, provoquant des comportements instables au retour au
+          # premier plan. "singleInstance" isole complètement cette Activity
+          # dans sa propre tâche de façon prévisible et supportée, ce qui est
+          # plus sûr pour un écran affiché par-dessus le verrouillage lancé
+          # depuis un plugin natif. ──
           activity_decl = (
               '\n        <activity'
               '\n            android:name="com.hery.smax155.LockScreenGpsActivity"'
@@ -882,9 +1041,9 @@ jobs:
               '\n            android:showOnLockScreen="true"'
               '\n            android:turnScreenOn="true"'
               '\n            android:excludeFromRecents="true"'
-              '\n            android:launchMode="singleTask"'
+              '\n            android:launchMode="singleInstance"'
               '\n            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"'
-              '\n            android:configChanges="orientation|screenSize|keyboardHidden" />'
+              '\n            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout" />'
           )
 
           if 'LockScreenGpsActivity' not in content:
