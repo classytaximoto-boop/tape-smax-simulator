@@ -994,13 +994,14 @@ jobs:
         # connecté à ce réseau (manuellement, dans les réglages Wi-Fi Android
         # — aucun appairage BLE n'est fait ici, volontairement, pour rester
         # simple et fiable depuis un flux de travail sans debug USB), expose
-        # une API REST HTTP locale sur 10.5.5.9:8080 (Open GoPro API v1,
-        # HERO8 = ancienne génération "gpControl"). Ce plugin ne fait QUE
-        # des requêtes HTTP vers cette IP fixe : pas de BLE, pas de scan,
-        # pas de pairing — donc pas de logique complexe à déboguer sans
-        # accès physique au téléphone. Si le téléphone n'est pas connecté au
-        # Wi-Fi de la GoPro, chaque requête échoue simplement avec un
-        # timeout, remonté proprement au JS comme "non connecté". ──
+        # une API REST HTTP locale sur 10.5.5.9 (port 80 standard) — l'ancienne
+        # API "gpControl" façon HERO7, puisque la HERO8 ne supporte pas
+        # Open GoPro (ça commence à la HERO9) en dehors du mode webcam. Ce
+        # plugin ne fait QUE des requêtes HTTP vers cette IP fixe : pas de
+        # BLE, pas de scan, pas de pairing — donc pas de logique complexe à
+        # déboguer sans accès physique au téléphone. Si le téléphone n'est
+        # pas connecté au Wi-Fi de la GoPro, chaque requête échoue simplement
+        # avec un timeout, remonté proprement au JS comme "non connecté". ──
         run: |
           PKG_DIR="android/app/src/main/java/com/hery/smax155"
           mkdir -p "$PKG_DIR"
@@ -1039,9 +1040,18 @@ jobs:
 
               private static final String TAG = "SMAX155-GoProPlugin";
               // Adresse fixe de la caméra une fois connectée à son propre Wi-Fi AP —
-              // constante côté GoPro (HERO8/gpControl), ne dépend pas du téléphone.
+              // constante côté GoPro, ne dépend pas du téléphone.
+              //
+              // IMPORTANT — HERO8 Black : en dehors du mode webcam (GoPro Connect),
+              // la HERO8 utilise l'ancienne API "gpControl" façon HERO7, PAS
+              // Open GoPro (qui commence à la HERO9). Cette ancienne API répond
+              // sur le port HTTP standard (80), sans ":8080" — /gp/gpControl/status
+              // et /gp/gpControl/command/shutter fonctionnent sur
+              // "http://10.5.5.9/..." tout court. Le port 8080 n'est utilisé que
+              // pour le listing média (/gp/gpMediaList) et certains flux preview,
+              // pas pour status/commandes. Un premier essai avec ":8080" en dur
+              // donnait une 404 — confirmé en testant depuis Chrome directement.
               private static final String GOPRO_IP = "10.5.5.9";
-              private static final int GOPRO_PORT = 8080;
               private static final int TIMEOUT_MS = 2500;
 
               private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -1085,9 +1095,12 @@ jobs:
 
               // ── Requête HTTP GET générique vers la GoPro, exécutée hors du thread
               // UI (obligatoire sur Android : toute I/O réseau sur le thread principal
-              // lève une NetworkOnMainThreadException, fatale). ──
+              // lève une NetworkOnMainThreadException, fatale).
+              //
+              // Pas de port dans l'URL : port HTTP standard (80), voir note HERO8
+              // ci-dessus sur GOPRO_IP. ──
               private String httpGet(String path) throws Exception {
-                  URL url = new URL("http://" + GOPRO_IP + ":" + GOPRO_PORT + path);
+                  URL url = new URL("http://" + GOPRO_IP + path);
                   HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                   conn.setConnectTimeout(TIMEOUT_MS);
                   conn.setReadTimeout(TIMEOUT_MS);
@@ -1196,6 +1209,475 @@ jobs:
           JAVAEOF
           echo "GoProPlugin.java créé dans $PKG_DIR"
 
+      - name: Create GNSS native plugin (real satellite data + native position)
+        # ── ÉTAPE 1/2 du prompt GNSS natif — ce plugin fournit UNIQUEMENT le
+        # natif Android. L'intégration côté HTML (sélecteur de mode, panneau
+        # diagnostic, câblage vers GPSManager) est une étape séparée.
+        #
+        # Deux responsabilités bien distinctes, exposées comme deux groupes
+        # de méthodes séparés :
+        #
+        # 1) POSITION NATIVE (Mode 2 "GNSS natif") via LocationManager
+        #    directement (GPS_PROVIDER), au lieu de la Web Geolocation API du
+        #    WebView. Objet retourné dans le MÊME format que
+        #    GeolocationPosition (coords.latitude/longitude/altitude/
+        #    accuracy/speed/heading + timestamp) pour rester directement
+        #    compatible avec GPSManager.processPosition() côté JS, sans
+        #    dupliquer la logique de filtrage/distance/vitesse déjà en place.
+        #
+        # 2) DONNÉES SATELLITES RÉELLES via GnssStatus.Callback (nombre de
+        #    satellites visibles/utilisés, constellation par satellite,
+        #    fréquence porteuse quand exposée par le chipset/Android). Ces
+        #    données sont indépendantes du choix Mode 1/Mode 2 : elles
+        #    peuvent enrichir le panneau diagnostic même en Mode 1 (GPS
+        #    Standard), puisque le GNSS matériel tourne dans les deux cas.
+        #
+        # AUCUNE valeur n'est inventée : si GnssStatus n'est pas disponible
+        # (API < 24, ou chipset qui ne l'expose pas), ou si GnssMeasurements
+        # ne fournit pas la fréquence porteuse (matériel/Android ne
+        # l'exposent pas), les champs correspondants sont renvoyés null
+        # plutôt que remplis avec une estimation. ──
+        run: |
+          PKG_DIR="android/app/src/main/java/com/hery/smax155"
+          mkdir -p "$PKG_DIR"
+          cat > "$PKG_DIR/GnssNativePlugin.java" <<'JAVAEOF'
+          package com.hery.smax155;
+
+          import android.Manifest;
+          import android.content.Context;
+          import android.content.pm.PackageManager;
+          import android.location.GnssStatus;
+          import android.location.GpsSatellite;
+          import android.location.GpsStatus;
+          import android.location.Location;
+          import android.location.LocationListener;
+          import android.location.LocationManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Looper;
+          import android.util.Log;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.JSArray;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import com.getcapacitor.annotation.Permission;
+          import com.getcapacitor.annotation.PermissionCallback;
+
+          import java.util.HashMap;
+          import java.util.Iterator;
+          import java.util.Map;
+
+          // ── Plugin natif GNSS : position via LocationManager (Mode 2) +
+          // données satellites réelles via GnssStatus (tous modes). Ne
+          // remplace PAS GPSManager/watchPosition côté JS — se contente de
+          // fournir des données réelles, laissées au JS le soin de choisir
+          // quelle source utiliser et comment basculer entre elles (voir
+          // étape 2 du prompt GNSS natif, côté Yamaha_Smax.html). ──
+          @CapacitorPlugin(
+              name = "GnssNative",
+              permissions = {
+                  @Permission(
+                      strings = { Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION },
+                      alias = "location"
+                  )
+              }
+          )
+          public class GnssNativePlugin extends Plugin implements LocationListener {
+
+              private static final String TAG = "SMAX155-GnssNative";
+
+              private LocationManager locationManager;
+              private boolean listening = false;
+
+              // ── État satellites courant, mis à jour en continu par
+              // GnssStatus.Callback (API 24+) ou GpsStatus.Listener (repli
+              // API < 24). Lu à la demande par getSatelliteInfo(), et aussi
+              // relayé en direct au JS via un événement si un listener JS
+              // est abonné (voir notifyListeners plus bas). ──
+              private volatile int satsVisible = -1;
+              private volatile int satsUsed = -1;
+              private final Map<String, Integer> constellationVisible = new HashMap<>();
+              private final Map<String, Integer> constellationUsed = new HashMap<>();
+              private volatile boolean gnssStatusSupported = false;
+              private volatile boolean carrierFrequencySupported = false; // GnssMeasurements dispo
+
+              private GnssStatus.Callback gnssCallback; // API 24+
+              private GpsStatus.Listener legacyGpsListener; // repli API < 24
+              private android.location.GnssMeasurementsEvent.Callback gnssMeasCallback; // API 26+, fréquence porteuse
+
+              private String constellationName(int type) {
+                  // GnssStatus.CONSTELLATION_* — valeurs stables depuis l'API 24.
+                  switch (type) {
+                      case GnssStatus.CONSTELLATION_GPS: return "GPS";
+                      case GnssStatus.CONSTELLATION_GALILEO: return "Galileo";
+                      case GnssStatus.CONSTELLATION_GLONASS: return "GLONASS";
+                      case GnssStatus.CONSTELLATION_BEIDOU: return "BeiDou";
+                      case GnssStatus.CONSTELLATION_QZSS: return "QZSS";
+                      case GnssStatus.CONSTELLATION_SBAS: return "SBAS";
+                      case GnssStatus.CONSTELLATION_IRNSS: return "IRNSS";
+                      default: return "Inconnu";
+                  }
+              }
+
+              @Override
+              public void load() {
+                  locationManager = (LocationManager) getContext().getSystemService(Context.LOCATION_SERVICE);
+              }
+
+              @PluginMethod
+              public void isAvailable(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  boolean hasGps = locationManager != null && locationManager.getAllProviders().contains(LocationManager.GPS_PROVIDER);
+                  ret.put("available", hasGps);
+                  ret.put("gnssStatusApiLevel", Build.VERSION.SDK_INT >= Build.VERSION_CODES.N); // API 24+
+                  call.resolve(ret);
+              }
+
+              private boolean hasLocationPermission() {
+                  return ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                      || ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+              }
+
+              // ── Démarre l'écoute position GPS_PROVIDER + statut satellites.
+              // Honnête sur l'échec : si la permission manque ou si le
+              // GPS_PROVIDER n'existe pas sur l'appareil, on rejette avec un
+              // message clair plutôt que de simuler un succès. ──
+              @PluginMethod
+              public void start(PluginCall call) {
+                  if (!hasLocationPermission()) {
+                      // Demande la permission via le mécanisme standard Capacitor ;
+                      // requestPermissionForAlias rappelle onStart via
+                      // @PermissionCallback une fois la réponse utilisateur connue.
+                      requestPermissionForAlias("location", call, "startPermCallback");
+                      return;
+                  }
+                  startInternal(call);
+              }
+
+              @PermissionCallback
+              private void startPermCallback(PluginCall call) {
+                  if (hasLocationPermission()) {
+                      startInternal(call);
+                  } else {
+                      call.reject("Permission de localisation refusée — le GNSS natif ne peut pas démarrer sans ACCESS_FINE_LOCATION ou ACCESS_COARSE_LOCATION.");
+                  }
+              }
+
+              private void startInternal(PluginCall call) {
+                  try {
+                      if (locationManager == null) {
+                          call.reject("LocationManager indisponible sur cet appareil.");
+                          return;
+                      }
+                      if (!locationManager.getAllProviders().contains(LocationManager.GPS_PROVIDER)) {
+                          call.reject("GPS_PROVIDER indisponible sur cet appareil — le GNSS natif ne peut pas être utilisé ici.");
+                          return;
+                      }
+                      if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                          call.reject("Le GPS du téléphone est désactivé (Réglages → Position) — active-le puis réessaie.");
+                          return;
+                      }
+
+                      if (!listening) {
+                          // minTime=0, minDistance=0 : on laisse Android fournir les
+                          // positions à son propre rythme réel (point 10 du prompt —
+                          // ne pas imposer de fréquence artificielle), le filtrage/
+                          // lissage éventuel se fait côté JS dans GPSManager.
+                          locationManager.requestLocationUpdates(
+                              LocationManager.GPS_PROVIDER, 0, 0f, this, Looper.getMainLooper()
+                          );
+                          attachSatelliteListener();
+                          listening = true;
+                      }
+
+                      JSObject ret = new JSObject();
+                      ret.put("started", true);
+                      call.resolve(ret);
+                  } catch (SecurityException e) {
+                      Log.e(TAG, "start() a échoué (permission)", e);
+                      call.reject("Permission refusée par le système : " + e.getMessage());
+                  } catch (Exception e) {
+                      Log.e(TAG, "start() a échoué", e);
+                      call.reject("Démarrage GNSS natif échoué : " + e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void stop(PluginCall call) {
+                  try {
+                      stopInternal();
+                      call.resolve();
+                  } catch (Exception e) {
+                      Log.e(TAG, "stop() a échoué", e);
+                      call.reject("Arrêt GNSS natif échoué : " + e.getMessage());
+                  }
+              }
+
+              private void stopInternal() {
+                  if (!listening) return;
+                  try {
+                      locationManager.removeUpdates(this);
+                  } catch (SecurityException e) {
+                      Log.w(TAG, "removeUpdates a échoué (permission déjà révoquée ?)", e);
+                  }
+                  detachSatelliteListener();
+                  listening = false;
+              }
+
+              @SuppressWarnings("deprecation")
+              private void attachSatelliteListener() {
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                          // API 24+ : GnssStatus.Callback — distingue visibles/utilisés
+                          // ET la constellation de chaque satellite individuellement.
+                          gnssCallback = new GnssStatus.Callback() {
+                              @Override
+                              public void onSatelliteStatusChanged(GnssStatus status) {
+                                  int visible = status.getSatelliteCount();
+                                  int used = 0;
+                                  Map<String, Integer> vis = new HashMap<>();
+                                  Map<String, Integer> usd = new HashMap<>();
+                                  for (int i = 0; i < visible; i++) {
+                                      String c = constellationName(status.getConstellationType(i));
+                                      vis.put(c, (vis.containsKey(c) ? vis.get(c) : 0) + 1);
+                                      if (status.usedInFix(i)) {
+                                          used++;
+                                          usd.put(c, (usd.containsKey(c) ? usd.get(c) : 0) + 1);
+                                      }
+                                  }
+                                  satsVisible = visible;
+                                  satsUsed = used;
+                                  synchronized (constellationVisible) {
+                                      constellationVisible.clear();
+                                      constellationVisible.putAll(vis);
+                                  }
+                                  synchronized (constellationUsed) {
+                                      constellationUsed.clear();
+                                      constellationUsed.putAll(usd);
+                                  }
+                                  gnssStatusSupported = true;
+                                  emitSatelliteUpdate();
+                              }
+                          };
+                          try {
+                              locationManager.registerGnssStatusCallback(gnssCallback, null);
+                          } catch (SecurityException e) {
+                              Log.w(TAG, "registerGnssStatusCallback refusé (permission)", e);
+                          }
+
+                          // API 26+ : GnssMeasurementsEvent — seule source possible pour
+                          // la fréquence porteuse (carrier frequency) par satellite. Sur
+                          // beaucoup d'appareils, y compris récents, le chipset ne fournit
+                          // simplement pas cette donnée (callback jamais déclenché ou
+                          // getCarrierFrequencyHz() absent) — dans ce cas
+                          // carrierFrequencySupported reste false, honnêtement.
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              gnssMeasCallback = new android.location.GnssMeasurementsEvent.Callback() {
+                                  @Override
+                                  public void onGnssMeasurementsReceived(android.location.GnssMeasurementsEvent event) {
+                                      if (event.getMeasurements() != null && !event.getMeasurements().isEmpty()) {
+                                          carrierFrequencySupported = true;
+                                      }
+                                  }
+                              };
+                              try {
+                                  locationManager.registerGnssMeasurementsCallback(gnssMeasCallback, null);
+                              } catch (SecurityException e) {
+                                  Log.w(TAG, "registerGnssMeasurementsCallback refusé (permission)", e);
+                              } catch (Exception e) {
+                                  // Certains appareils lèvent d'autres exceptions si le
+                                  // chipset ne supporte pas les GNSS measurements du tout.
+                                  Log.w(TAG, "GnssMeasurements indisponible sur cet appareil", e);
+                              }
+                          }
+                      } else {
+                          // Repli API < 24 (Android 6/7) : GpsStatus.Listener, API plus
+                          // pauvre — pas de distinction par constellation, pas de
+                          // fréquence porteuse. On expose seulement visible/utilisés.
+                          legacyGpsListener = new GpsStatus.Listener() {
+                              @Override
+                              public void onGpsStatusChanged(int event) {
+                                  if (event != GpsStatus.GPS_EVENT_SATELLITE_STATUS) return;
+                                  try {
+                                      GpsStatus gpsStatus = locationManager.getGpsStatus(null);
+                                      if (gpsStatus == null) return;
+                                      int visible = 0, used = 0;
+                                      Iterator<GpsSatellite> it = gpsStatus.getSatellites().iterator();
+                                      while (it.hasNext()) {
+                                          GpsSatellite sat = it.next();
+                                          visible++;
+                                          if (sat.usedInFix()) used++;
+                                      }
+                                      satsVisible = visible;
+                                      satsUsed = used;
+                                      gnssStatusSupported = true;
+                                      emitSatelliteUpdate();
+                                  } catch (SecurityException e) {
+                                      Log.w(TAG, "getGpsStatus refusé (permission)", e);
+                                  }
+                              }
+                          };
+                          try {
+                              locationManager.addGpsStatusListener(legacyGpsListener);
+                          } catch (SecurityException e) {
+                              Log.w(TAG, "addGpsStatusListener refusé (permission)", e);
+                          }
+                      }
+                  } catch (Exception e) {
+                      Log.e(TAG, "attachSatelliteListener a échoué", e);
+                  }
+              }
+
+              @SuppressWarnings("deprecation")
+              private void detachSatelliteListener() {
+                  try {
+                      if (gnssCallback != null) {
+                          locationManager.unregisterGnssStatusCallback(gnssCallback);
+                          gnssCallback = null;
+                      }
+                      if (gnssMeasCallback != null) {
+                          locationManager.unregisterGnssMeasurementsCallback(gnssMeasCallback);
+                          gnssMeasCallback = null;
+                      }
+                      if (legacyGpsListener != null) {
+                          locationManager.removeGpsStatusListener(legacyGpsListener);
+                          legacyGpsListener = null;
+                      }
+                  } catch (Exception e) {
+                      Log.w(TAG, "detachSatelliteListener a échoué", e);
+                  }
+              }
+
+              // ── Relaie chaque mise à jour satellites au JS via un événement
+              // Capacitor, pour un affichage temps réel dans le panneau
+              // diagnostic (étape 2) sans que le JS ait besoin de poller. ──
+              private void emitSatelliteUpdate() {
+                  JSObject data = buildSatelliteInfo();
+                  notifyListeners("gnssSatelliteUpdate", data);
+              }
+
+              private JSObject buildSatelliteInfo() {
+                  JSObject ret = new JSObject();
+                  ret.put("supported", gnssStatusSupported);
+                  ret.put("visible", satsVisible >= 0 ? satsVisible : JSObject.NULL);
+                  ret.put("used", satsUsed >= 0 ? satsUsed : JSObject.NULL);
+                  ret.put("carrierFrequencySupported", carrierFrequencySupported);
+
+                  JSObject visByConst = new JSObject();
+                  synchronized (constellationVisible) {
+                      for (Map.Entry<String, Integer> e : constellationVisible.entrySet()) {
+                          visByConst.put(e.getKey(), e.getValue());
+                      }
+                  }
+                  JSObject usedByConst = new JSObject();
+                  synchronized (constellationUsed) {
+                      for (Map.Entry<String, Integer> e : constellationUsed.entrySet()) {
+                          usedByConst.put(e.getKey(), e.getValue());
+                      }
+                  }
+                  ret.put("visibleByConstellation", visByConst);
+                  ret.put("usedByConstellation", usedByConst);
+                  return ret;
+              }
+
+              @PluginMethod
+              public void getSatelliteInfo(PluginCall call) {
+                  call.resolve(buildSatelliteInfo());
+              }
+
+              @PluginMethod
+              public void getLastLocation(PluginCall call) {
+                  try {
+                      if (!hasLocationPermission()) {
+                          call.reject("Permission de localisation manquante.");
+                          return;
+                      }
+                      Location loc = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                      if (loc == null) {
+                          JSObject ret = new JSObject();
+                          ret.put("available", false);
+                          call.resolve(ret);
+                          return;
+                      }
+                      call.resolve(locationToJs(loc));
+                  } catch (SecurityException e) {
+                      call.reject("Permission refusée : " + e.getMessage());
+                  } catch (Exception e) {
+                      call.reject("getLastLocation a échoué : " + e.getMessage());
+                  }
+              }
+
+              // ── Convertit un android.location.Location vers le MÊME format
+              // que GeolocationPosition (coords.{latitude,longitude,altitude,
+              // accuracy,speed,heading} + timestamp), pour rester directement
+              // compatible avec GPSManager.processPosition() côté JS SANS
+              // dupliquer sa logique de filtrage/distance/vitesse. speed reste
+              // en m/s (comme l'API Web standard) — la conversion en km/h se
+              // fait déjà côté JS dans GPSManager. ──
+              private JSObject locationToJs(Location loc) {
+                  JSObject coords = new JSObject();
+                  coords.put("latitude", loc.getLatitude());
+                  coords.put("longitude", loc.getLongitude());
+                  coords.put("altitude", loc.hasAltitude() ? loc.getAltitude() : JSObject.NULL);
+                  coords.put("accuracy", loc.hasAccuracy() ? loc.getAccuracy() : JSObject.NULL);
+                  // Précision verticale/vitesse : API 26+ seulement (hasVerticalAccuracy
+                  // etc. n'existent pas avant). Honnête : null si non exposé.
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      coords.put("verticalAccuracy", loc.hasVerticalAccuracy() ? loc.getVerticalAccuracyMeters() : JSObject.NULL);
+                      coords.put("speedAccuracy", loc.hasSpeedAccuracy() ? loc.getSpeedAccuracyMetersPerSecond() : JSObject.NULL);
+                      coords.put("bearingAccuracy", loc.hasBearingAccuracy() ? loc.getBearingAccuracyDegrees() : JSObject.NULL);
+                  } else {
+                      coords.put("verticalAccuracy", JSObject.NULL);
+                      coords.put("speedAccuracy", JSObject.NULL);
+                      coords.put("bearingAccuracy", JSObject.NULL);
+                  }
+                  coords.put("speed", loc.hasSpeed() ? loc.getSpeed() : JSObject.NULL);
+                  coords.put("heading", loc.hasBearing() ? loc.getBearing() : JSObject.NULL);
+
+                  JSObject ret = new JSObject();
+                  ret.put("coords", coords);
+                  ret.put("timestamp", loc.getTime());
+                  ret.put("provider", loc.getProvider());
+                  return ret;
+              }
+
+              @Override
+              public void onLocationChanged(Location location) {
+                  // ── Relayé au JS via un événement, pas un simple resolve() de
+                  // start() : start() ne doit résoudre qu'une seule fois (au
+                  // démarrage), alors que les positions arrivent en continu.
+                  // L'étape 2 (côté HTML) s'abonne à cet événement pour appeler
+                  // GPSManager.processPosition() directement avec cet objet. ──
+                  notifyListeners("gnssLocationUpdate", locationToJs(location));
+              }
+
+              @Override
+              public void onStatusChanged(String provider, int status, Bundle extras) { /* dépréciée, rien à faire */ }
+
+              @Override
+              public void onProviderEnabled(String provider) {
+                  JSObject ret = new JSObject();
+                  ret.put("provider", provider);
+                  notifyListeners("gnssProviderEnabled", ret);
+              }
+
+              @Override
+              public void onProviderDisabled(String provider) {
+                  JSObject ret = new JSObject();
+                  ret.put("provider", provider);
+                  notifyListeners("gnssProviderDisabled", ret);
+                  // Le GPS matériel vient d'être coupé : le JS doit pouvoir
+                  // basculer en fallback GPS Standard proprement (point 8 du
+                  // prompt), donc on prévient explicitement plutôt que de
+                  // laisser les positions simplement s'arrêter en silence.
+              }
+          }
+          JAVAEOF
+          echo "GnssNativePlugin.java créé dans $PKG_DIR"
+
       - name: Register GpsNotif plugin in MainActivity
         run: |
           python3 - <<'EOF'
@@ -1294,6 +1776,50 @@ jobs:
               with open(path, "w") as f:
                   f.write(content)
               print("MainActivity.java : GoProPlugin enregistré dans", path)
+          EOF
+
+      - name: Register GnssNative plugin in MainActivity
+        run: |
+          python3 - <<'EOF'
+          import re, glob
+          matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
+          if not matches:
+              print("WARNING: MainActivity.java not found, skipping GnssNative registration")
+          else:
+              path = matches[0]
+              with open(path) as f:
+                  content = f.read()
+
+              if "import com.hery.smax155.GnssNativePlugin;" not in content:
+                  content = content.replace(
+                      "import com.getcapacitor.BridgeActivity;",
+                      "import com.getcapacitor.BridgeActivity;\n"
+                      "import com.hery.smax155.GnssNativePlugin;"
+                  )
+
+              if "registerPlugin(GnssNativePlugin.class);" not in content:
+                  if "super.onCreate(savedInstanceState);" in content:
+                      content = content.replace(
+                          "super.onCreate(savedInstanceState);",
+                          "registerPlugin(GnssNativePlugin.class);\n        super.onCreate(savedInstanceState);",
+                          1
+                      )
+                  else:
+                      content = re.sub(
+                          r"(public class MainActivity extends BridgeActivity \{)",
+                          r"\1\n"
+                          r"    @Override\n"
+                          r"    protected void onCreate(android.os.Bundle savedInstanceState) {\n"
+                          r"        registerPlugin(GnssNativePlugin.class);\n"
+                          r"        super.onCreate(savedInstanceState);\n"
+                          r"    }\n",
+                          content,
+                          count=1
+                      )
+
+              with open(path, "w") as f:
+                  f.write(content)
+              print("MainActivity.java : GnssNativePlugin enregistré dans", path)
           EOF
 
       - name: Declare LockScreenGpsActivity in AndroidManifest
