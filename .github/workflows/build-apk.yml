@@ -50,10 +50,11 @@ jobs:
       - name: Patch MainActivity to grant WebView media permissions
         run: |
           python3 - <<'EOF'
-          import re, glob
+          import re, glob, sys
           matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
           if not matches:
-              print("WARNING: MainActivity.java not found, skipping")
+              print("ERREUR : MainActivity.java introuvable — 'npx cap add android' a-t-il bien tourné avant ce step ?")
+              sys.exit(1)
           else:
               path = matches[0]
               with open(path) as f:
@@ -106,7 +107,7 @@ jobs:
                   "\n        // Permissions runtime Android (popup système), nécessaires en plus\n"
                   "        // du <uses-permission> du manifeste sur Android 6+.\n"
                   "        //\n"
-                  "        // IMPORTANT : on NE demande PAS RECORD_AUDIO/CAMERA ici, au démarrage.\n"
+                  "        // IMPORTANT : on NE demande PAS RECORD_AUDIO ici, au démarrage.\n"
                   "        // Si on le fait, le popup système apparaît dès l'ouverture de l'app,\n"
                   "        // hors contexte (l'utilisateur ne sait pas encore pourquoi le micro\n"
                   "        // est demandé) — beaucoup de gens refusent par réflexe à ce moment-là.\n"
@@ -116,9 +117,9 @@ jobs:
                   "        // l'utilisateur clique dessus plus tard et pense l'autoriser — car\n"
                   "        // onPermissionRequest() voit la permission Android déjà DENIED et\n"
                   "        // appelle request.deny() silencieusement à chaque tentative.\n"
-                  "        // RECORD_AUDIO/CAMERA sont donc demandées PLUS BAS, à la volée dans\n"
+                  "        // RECORD_AUDIO est donc demandée PLUS BAS, à la volée dans\n"
                   "        // onPermissionRequest(), déclenché uniquement quand l'utilisateur\n"
-                  "        // appuie réellement sur le bouton micro/caméra dans l'app — c'est le\n"
+                  "        // appuie réellement sur le bouton micro dans l'app — c'est le\n"
                   "        // seul moment où le contexte justifie le popup et où Android autorise\n"
                   "        // encore un nouveau prompt.\n"
                   "        //\n"
@@ -129,7 +130,7 @@ jobs:
                   "        // la cause du bug \"aucune notification GPS n'apparaît nulle part\",\n"
                   "        // même dans le tiroir de notifications standard écran déverrouillé.\n"
                   "        //\n"
-                  "        // CORRECTIF MICRO : RECORD_AUDIO/CAMERA sont maintenant demandées ICI,\n"
+                  "        // CORRECTIF MICRO : RECORD_AUDIO est maintenant demandée ICI,\n"
                   "        // dès le démarrage, EN PLUS de ACCESS_FINE_LOCATION/POST_NOTIFICATIONS,\n"
                   "        // plutôt que d'attendre le clic sur le bouton MICRO dans\n"
                   "        // onPermissionRequest() plus bas. Raison : PermissionRequest.grant()\n"
@@ -230,20 +231,17 @@ jobs:
                   "                    // est déjà réellement accordée.\n"
                   "                    android.util.Log.d(\"SMAX155-Perm\", \"onPermissionRequest reçu pour: \" + java.util.Arrays.toString(request.getResources()));\n"
                   "                    runOnUiThread(() -> {\n"
-                  "                        boolean audioWanted = false, videoWanted = false;\n"
+                  "                        boolean audioWanted = false;\n"
                   "                        for (String res : request.getResources()) {\n"
                   "                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) audioWanted = true;\n"
-                  "                            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) videoWanted = true;\n"
                   "                        }\n"
                   "\n"
                   "                        boolean audioGranted = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;\n"
-                  "                        boolean videoGranted = ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;\n"
                   "\n"
                   "                        java.util.List<String> granted = new java.util.ArrayList<>();\n"
                   "                        if (audioWanted && audioGranted) granted.add(PermissionRequest.RESOURCE_AUDIO_CAPTURE);\n"
-                  "                        if (videoWanted && videoGranted) granted.add(PermissionRequest.RESOURCE_VIDEO_CAPTURE);\n"
                   "\n"
-                  "                        boolean stillMissing = (audioWanted && !audioGranted) || (videoWanted && !videoGranted);\n"
+                  "                        boolean stillMissing = (audioWanted && !audioGranted);\n"
                   "\n"
                   "                        if (!stillMissing && !granted.isEmpty()) {\n"
                   "                            // Tout ce qui est demandé est déjà accordé côté Android.\n"
@@ -266,7 +264,6 @@ jobs:
                   "                        // tard, une fois la réponse connue.\n"
                   "                        java.util.List<String> toReRequest = new java.util.ArrayList<>();\n"
                   "                        if (audioWanted && !audioGranted) toReRequest.add(Manifest.permission.RECORD_AUDIO);\n"
-                  "                        if (videoWanted && !videoGranted) toReRequest.add(Manifest.permission.CAMERA);\n"
                   "\n"
                   "                        if (!toReRequest.isEmpty()) {\n"
                   "                            // IMPORTANT : si un popup Android est déjà affiché à\n"
@@ -372,17 +369,15 @@ jobs:
                   "            // Réglages → Apps → Autorisations affiche Micro = Refusé alors que\n"
                   "            // l'utilisateur vient d'accepter. grantResults[] ne souffre pas de ce\n"
                   "            // délai de propagation : c'est la réponse déjà tranchée.\n"
-                  "            boolean audioGranted = false, videoGranted = false;\n"
+                  "            boolean audioGranted = false;\n"
                   "            for (int i = 0; i < permissions.length; i++) {\n"
                   "                boolean isGranted = i < grantResults.length && grantResults[i] == PackageManager.PERMISSION_GRANTED;\n"
                   "                if (Manifest.permission.RECORD_AUDIO.equals(permissions[i]) && isGranted) audioGranted = true;\n"
-                  "                if (Manifest.permission.CAMERA.equals(permissions[i]) && isGranted) videoGranted = true;\n"
                   "            }\n"
                   "\n"
                   "            java.util.List<String> granted = new java.util.ArrayList<>();\n"
                   "            for (String res : req.getResources()) {\n"
                   "                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) && audioGranted) granted.add(res);\n"
-                  "                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) && videoGranted) granted.add(res);\n"
                   "            }\n"
                   "            if (!granted.isEmpty()) {\n"
                   "                android.util.Log.d(\"SMAX155-Perm\", \"grant() différé (après popup runtime): \" + granted);\n"
@@ -458,9 +453,30 @@ jobs:
 
               with open(path, "w") as f:
                   f.write(content)
-              print("MainActivity.java patched:", path)
+
+              # ── Vérification post-écriture : on relit le fichier et on
+              # s'assure que les marqueurs attendus du patch sont bien
+              # présents. Sans ça, un pattern qui ne matche plus (ex.
+              # structure MainActivity.java changée par une nouvelle
+              # version de @capacitor/android) laisserait le fichier
+              # inchangé sans que le job échoue — le bug ne serait
+              # découvert qu'au runtime sur le téléphone. ──
+              with open(path) as f:
+                  written = f.read()
+              required_markers = [
+                  "onPermissionRequest",
+                  "onRequestPermissionsResult",
+                  "filePathCallback",
+                  "setDownloadListener",
+              ]
+              missing = [m for m in required_markers if m not in written]
+              if missing:
+                  print("ERREUR : le patch MainActivity.java a été écrit mais des marqueurs attendus sont absents :", missing)
+                  sys.exit(1)
+
+              print("MainActivity.java patched et vérifié:", path)
               print("----- FULL FILE CONTENT -----")
-              print(content)
+              print(written)
               print("----- END FILE CONTENT -----")
           EOF
 
@@ -479,31 +495,67 @@ jobs:
           # volée du package @capacitor/assets), ce qui donnait
           # "exit code 1" sans explication claire.
           mkdir -p assets
-          if [ ! -f icon-512.png ]; then
-            echo "ERREUR : icon-512.png introuvable à la racine du repo."
-            echo "@capacitor/assets a besoin d'un fichier source carré (min 1024x1024)"
-            echo "pour générer les icônes natives Android."
-            exit 1
-          fi
 
           pip install --break-system-packages --quiet Pillow
 
           python3 - <<'EOF'
+          import os
           from PIL import Image
-          src = Image.open("icon-512.png").convert("RGBA")
-          w, h = src.size
-          print(f"Icône source détectée : icon-512.png = {w}x{h}px, mode {src.mode}")
 
-          # @capacitor/assets exige un minimum de 1024x1024px pour les
-          # icônes sources. icon-512.png (512x512) est trop petit et fait
-          # planter l'outil sans message clair. On agrandit donc à 1024x1024
-          # (upscale simple, qualité suffisante pour une icône d'app —
-          # ce n'est pas destiné à être imprimé en grand format).
-          target = 1024
-          side = max(w, h, target)
-          resized = src.resize((side, side), Image.LANCZOS)
-          resized.save("assets/icon.png")
-          print(f"assets/icon.png créé : {side}x{side}px")
+          TARGET = 1024
+
+          # ── Source PRIORITAIRE : icon.png à la racine du repo. C'est
+          # censé être la vraie icône source haute résolution (pas un
+          # dérivé PWA comme icon-192/icon-512). Si elle existe et fait
+          # déjà au moins 1024x1024, on la copie TELLE QUELLE dans
+          # assets/icon.png — aucun upscale, aucune perte de qualité,
+          # design strictement inchangé.
+          #
+          # Repli : si icon.png est absent, illisible, ou trop petite
+          # (<1024x1024), on retombe sur l'ancien comportement (upscale
+          # depuis icon-512.png) pour que le workflow reste fonctionnel
+          # même sur un clone propre où icon.png n'existerait pas encore.
+          used_source = None
+
+          if os.path.isfile("icon.png"):
+              try:
+                  src = Image.open("icon.png").convert("RGBA")
+                  w, h = src.size
+                  print(f"icon.png détectée : {w}x{h}px, mode {src.mode}")
+                  if w >= TARGET and h >= TARGET:
+                      src.save("assets/icon.png")
+                      used_source = f"icon.png ({w}x{h}px, copiée sans upscale)"
+                  else:
+                      print(f"icon.png trop petite ({w}x{h} < {TARGET}x{TARGET}) — repli sur icon-512.png")
+              except Exception as e:
+                  print(f"icon.png illisible ({e}) — repli sur icon-512.png")
+          else:
+              print("icon.png introuvable à la racine — repli sur icon-512.png")
+
+          if used_source is None:
+              if not os.path.isfile("icon-512.png"):
+                  print("ERREUR : ni icon.png (>=1024x1024) ni icon-512.png trouvables à la racine du repo.")
+                  print("@capacitor/assets a besoin d'un fichier source carré (min 1024x1024)")
+                  print("pour générer les icônes natives Android.")
+                  raise SystemExit(1)
+
+              src = Image.open("icon-512.png").convert("RGBA")
+              w, h = src.size
+              print(f"Icône source détectée : icon-512.png = {w}x{h}px, mode {src.mode}")
+
+              # @capacitor/assets exige un minimum de 1024x1024px pour les
+              # icônes sources. icon-512.png (512x512) est trop petit et fait
+              # planter l'outil sans message clair. On agrandit donc à 1024x1024
+              # (upscale simple, qualité suffisante pour une icône d'app —
+              # ce n'est pas destiné à être imprimé en grand format). Ce repli
+              # ne sert qu'en dernier recours, quand icon.png n'est pas
+              # disponible en haute résolution.
+              side = max(w, h, TARGET)
+              resized = src.resize((side, side), Image.LANCZOS)
+              resized.save("assets/icon.png")
+              used_source = f"icon-512.png upscalée à {side}x{side}px (repli)"
+
+          print(f"assets/icon.png créé — source utilisée : {used_source}")
           EOF
 
           echo "----- Contenu de assets/ -----"
@@ -521,30 +573,55 @@ jobs:
       - name: Add native permissions
         run: |
           python3 - <<'EOF'
-          import re
+          import re, sys
           path = "android/app/src/main/AndroidManifest.xml"
           with open(path) as f:
               content = f.read()
-          perms = """
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-              <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
-              <uses-permission android:name="android.permission.CAMERA" />
-              <uses-permission android:name="android.permission.RECORD_AUDIO" />
-              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-              <uses-permission android:name="android.permission.WAKE_LOCK" />
-              <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-              <uses-feature android:name="android.hardware.camera" android:required="false" />
-              <uses-feature android:name="android.hardware.location.gps" android:required="false" />
-          """
-          content = re.sub(r'(<manifest[^>]*>)', r'\1' + perms, content, count=1)
-          with open(path, "w") as f:
-              f.write(content)
+
+          # ── Garde anti-duplication : si ce step est relancé (retry
+          # manuel du job, re-exécution), on ne réinjecte pas une
+          # deuxième fois les mêmes <uses-permission>. On teste sur une
+          # permission représentative du bloc entier. ──
+          if "android.permission.ACCESS_BACKGROUND_LOCATION" in content:
+              print("Permissions déjà présentes dans AndroidManifest.xml, rien à faire")
+          else:
+              perms = """
+                  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+                  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+                  <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+                  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+                  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+                  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+                  <uses-permission android:name="android.permission.WAKE_LOCK" />
+                  <uses-permission android:name="android.permission.INTERNET" />
+                  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+                  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+                  <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+              """
+              new_content, n_subs = re.subn(r'(<manifest[^>]*>)', r'\1' + perms, content, count=1)
+
+              # ── Vérification que le pattern <manifest ...> a réellement
+              # matché. re.sub() sans vérification renvoie le contenu
+              # INCHANGÉ en silence si le pattern ne matche pas — ce qui
+              # ferait réussir le job sans qu'aucune permission ne soit
+              # jamais ajoutée. ──
+              if n_subs == 0:
+                  print("ERREUR : balise <manifest ...> introuvable dans AndroidManifest.xml — impossible d'ajouter les permissions.")
+                  sys.exit(1)
+
+              with open(path, "w") as f:
+                  f.write(new_content)
+
+              # ── Vérification post-écriture ──
+              with open(path) as f:
+                  written = f.read()
+              if "android.permission.ACCESS_BACKGROUND_LOCATION" not in written:
+                  print("ERREUR : permissions écrites mais absentes à la relecture d'AndroidManifest.xml.")
+                  sys.exit(1)
+
+              print("AndroidManifest.xml : permissions ajoutées et vérifiées")
           EOF
       - name: Create fullscreen lock-screen GPS Activity + layout
         run: |
@@ -1681,10 +1758,11 @@ jobs:
       - name: Register GpsNotif plugin in MainActivity
         run: |
           python3 - <<'EOF'
-          import re, glob
+          import re, glob, sys
           matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
           if not matches:
-              print("WARNING: MainActivity.java not found, skipping GpsNotif registration")
+              print("ERREUR : MainActivity.java introuvable — impossible d'enregistrer GpsNotifPlugin.")
+              sys.exit(1)
           else:
               path = matches[0]
               with open(path) as f:
@@ -1728,16 +1806,24 @@ jobs:
 
               with open(path, "w") as f:
                   f.write(content)
-              print("MainActivity.java : GpsNotifPlugin enregistré dans", path)
+
+              with open(path) as f:
+                  written = f.read()
+              if "registerPlugin(GpsNotifPlugin.class);" not in written:
+                  print("ERREUR : GpsNotifPlugin écrit mais registerPlugin(GpsNotifPlugin.class) absent à la relecture de MainActivity.java.")
+                  sys.exit(1)
+
+              print("MainActivity.java : GpsNotifPlugin enregistré et vérifié dans", path)
           EOF
 
       - name: Register GoPro plugin in MainActivity
         run: |
           python3 - <<'EOF'
-          import re, glob
+          import re, glob, sys
           matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
           if not matches:
-              print("WARNING: MainActivity.java not found, skipping GoPro registration")
+              print("ERREUR : MainActivity.java introuvable — impossible d'enregistrer GoProPlugin.")
+              sys.exit(1)
           else:
               path = matches[0]
               with open(path) as f:
@@ -1775,16 +1861,24 @@ jobs:
 
               with open(path, "w") as f:
                   f.write(content)
-              print("MainActivity.java : GoProPlugin enregistré dans", path)
+
+              with open(path) as f:
+                  written = f.read()
+              if "registerPlugin(GoProPlugin.class);" not in written:
+                  print("ERREUR : GoProPlugin écrit mais registerPlugin(GoProPlugin.class) absent à la relecture de MainActivity.java.")
+                  sys.exit(1)
+
+              print("MainActivity.java : GoProPlugin enregistré et vérifié dans", path)
           EOF
 
       - name: Register GnssNative plugin in MainActivity
         run: |
           python3 - <<'EOF'
-          import re, glob
+          import re, glob, sys
           matches = glob.glob("android/app/src/main/java/**/MainActivity.java", recursive=True)
           if not matches:
-              print("WARNING: MainActivity.java not found, skipping GnssNative registration")
+              print("ERREUR : MainActivity.java introuvable — impossible d'enregistrer GnssNativePlugin.")
+              sys.exit(1)
           else:
               path = matches[0]
               with open(path) as f:
@@ -1819,13 +1913,20 @@ jobs:
 
               with open(path, "w") as f:
                   f.write(content)
-              print("MainActivity.java : GnssNativePlugin enregistré dans", path)
+
+              with open(path) as f:
+                  written = f.read()
+              if "registerPlugin(GnssNativePlugin.class);" not in written:
+                  print("ERREUR : GnssNativePlugin écrit mais registerPlugin(GnssNativePlugin.class) absent à la relecture de MainActivity.java.")
+                  sys.exit(1)
+
+              print("MainActivity.java : GnssNativePlugin enregistré et vérifié dans", path)
           EOF
 
       - name: Declare LockScreenGpsActivity in AndroidManifest
         run: |
           python3 - <<'EOF'
-          import re
+          import re, sys
           path = "android/app/src/main/AndroidManifest.xml"
           with open(path) as f:
               content = f.read()
@@ -1859,10 +1960,25 @@ jobs:
           )
 
           if 'LockScreenGpsActivity' not in content:
-              content = re.sub(r'(</application>)', activity_decl + r'\n    \1', content, count=1)
+              new_content, n_subs = re.subn(r'(</application>)', activity_decl + r'\n    \1', content, count=1)
+
+              # ── Vérification que </application> a réellement matché,
+              # sinon re.sub renvoie le contenu inchangé en silence et le
+              # job réussirait sans que l'Activity ne soit déclarée. ──
+              if n_subs == 0:
+                  print("ERREUR : balise </application> introuvable dans AndroidManifest.xml — impossible de déclarer LockScreenGpsActivity.")
+                  sys.exit(1)
+
               with open(path, "w") as f:
-                  f.write(content)
-              print("AndroidManifest.xml : LockScreenGpsActivity déclarée")
+                  f.write(new_content)
+
+              with open(path) as f:
+                  written = f.read()
+              if "LockScreenGpsActivity" not in written:
+                  print("ERREUR : LockScreenGpsActivity écrite mais absente à la relecture d'AndroidManifest.xml.")
+                  sys.exit(1)
+
+              print("AndroidManifest.xml : LockScreenGpsActivity déclarée et vérifiée")
           else:
               print("LockScreenGpsActivity déjà déclarée, rien à faire")
           EOF
@@ -1870,43 +1986,75 @@ jobs:
       - name: Set status bar & navigation bar color
         run: |
           python3 - <<'EOF'
+          import sys
           path = "android/app/src/main/res/values/styles.xml"
           with open(path) as f:
               content = f.read()
 
-          items = (
-              '\n        <item name="android:statusBarColor">#f4d000</item>'
-              '\n        <item name="android:navigationBarColor">#f4d000</item>'
-              '\n        <item name="android:windowLightStatusBar">true</item>'
-              '\n        <item name="android:windowLightNavigationBar">true</item>'
-          )
-
-          idx = content.find("</style>")
-          if idx != -1:
-              content = content[:idx] + items + "\n    " + content[idx:]
-              with open(path, "w") as f:
-                  f.write(content)
-              print("styles.xml patched")
+          # ── Garde anti-duplication : si ce step est relancé, on n'ajoute
+          # pas une deuxième fois les mêmes <item>. ──
+          if "statusBarColor" in content:
+              print("styles.xml déjà patché (statusBarColor présent), rien à faire")
           else:
-              print("WARNING: </style> not found, styles.xml left unchanged")
+              items = (
+                  '\n        <item name="android:statusBarColor">#f4d000</item>'
+                  '\n        <item name="android:navigationBarColor">#f4d000</item>'
+                  '\n        <item name="android:windowLightStatusBar">true</item>'
+                  '\n        <item name="android:windowLightNavigationBar">true</item>'
+              )
+
+              idx = content.find("</style>")
+              if idx == -1:
+                  print("ERREUR : balise </style> introuvable dans styles.xml — impossible de fixer les couleurs de barre.")
+                  sys.exit(1)
+
+              new_content = content[:idx] + items + "\n    " + content[idx:]
+              with open(path, "w") as f:
+                  f.write(new_content)
+
+              with open(path) as f:
+                  written = f.read()
+              if "statusBarColor" not in written:
+                  print("ERREUR : styles.xml écrit mais statusBarColor absent à la relecture.")
+                  sys.exit(1)
+
+              print("styles.xml patched et vérifié")
           EOF
 
       - name: Pin target/compile SDK to 34
         run: |
           python3 - <<'EOF'
-          import re
+          import re, sys
           path = "android/variables.gradle"
           try:
               with open(path) as f:
                   content = f.read()
           except FileNotFoundError:
-              print("variables.gradle not found, skipping")
+              print("ERREUR : android/variables.gradle introuvable — 'npx cap add android' a-t-il bien tourné avant ce step ?")
+              sys.exit(1)
           else:
-              content = re.sub(r"compileSdkVersion\s*=\s*\d+", "compileSdkVersion = 34", content)
-              content = re.sub(r"targetSdkVersion\s*=\s*\d+", "targetSdkVersion = 34", content)
+              new_content, n_compile = re.subn(r"compileSdkVersion\s*=\s*\d+", "compileSdkVersion = 34", content)
+              new_content, n_target = re.subn(r"targetSdkVersion\s*=\s*\d+", "targetSdkVersion = 34", new_content)
+
+              # ── Vérification que les deux patterns ont bien matché.
+              # S'ils n'existent pas (variables.gradle a changé de forme
+              # dans une nouvelle version de @capacitor/android), le
+              # fichier serait laissé inchangé en silence et le SDK cible
+              # resterait à son ancienne valeur sans que le build échoue. ──
+              if n_compile == 0 or n_target == 0:
+                  print(f"ERREUR : pattern SDK introuvable dans variables.gradle (compileSdkVersion trouvé: {n_compile}, targetSdkVersion trouvé: {n_target}).")
+                  sys.exit(1)
+
               with open(path, "w") as f:
-                  f.write(content)
-              print("variables.gradle patched to SDK 34")
+                  f.write(new_content)
+
+              with open(path) as f:
+                  written = f.read()
+              if "compileSdkVersion = 34" not in written or "targetSdkVersion = 34" not in written:
+                  print("ERREUR : variables.gradle écrit mais SDK 34 absent à la relecture.")
+                  sys.exit(1)
+
+              print("variables.gradle patched to SDK 34 et vérifié")
           EOF
 
       - name: Sync Capacitor
