@@ -1,19 +1,10 @@
 {
-  "name": "smax155-app",
-  "version": "1.0.0",
-  "description": "Simulateur Yamaha SMAX 155",
-  "scripts": {
-    "sync": "cap sync android"
-  },
-  "dependencies": {
-    "@capacitor/android": "^6.1.2",
-    "@capacitor/core": "^6.1.2",
-    "@capacitor/camera": "^6.0.2",
-    "@capacitor/local-notifications": "^6.1.0",
-    "@capacitor/haptics": "^6.0.1",
-    "@capacitor-community/background-geolocation": "^1.2.24"
-  },
-  "devDependencies": {
-    "@capacitor/cli": "^6.1.2"
+  "appId": "com.hery.smax155",
+  "appName": "SMAX 155",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true,
+    "useLegacyBridge": true
   }
 }
